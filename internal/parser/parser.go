@@ -1812,19 +1812,16 @@ func (p *Parser) parseInputStatement() ast.Statement {
 
 	// Regular INPUT: optional prompt string followed by `;` or `,`
 	// e.g.: INPUT "Enter value: ";x  or  INPUT "Enter value: ", x  or  INPUT x
+	prompt := ""
 	if p.curTokenIs(lexer.TOKEN_STRING) {
-		// Peek ahead: if the next token after the string is `;` or `,` then it's a prompt
-		prompt := p.parseExpression(PREC_LOWEST)
+		prompt = p.curToken.Literal
+		p.nextToken() // consume the string literal
 		if p.curTokenIs(lexer.TOKEN_SEMICOLON) || p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken() // skip prompt separator
 		}
-		vars := p.parseExpressionList()
-		// Prepend prompt as first "variable" so codegen can print it
-		allVars := append([]ast.Expression{prompt}, vars...)
-		return &ast.ReadStatement{BasePos: pos, Variables: allVars}
 	}
 	vars := p.parseExpressionList()
-	return &ast.ReadStatement{BasePos: pos, Variables: vars}
+	return &ast.ReadStatement{BasePos: pos, Variables: vars, IsInput: true, Prompt: prompt}
 }
 
 func (p *Parser) parseLineStatement() ast.Statement {
@@ -1844,17 +1841,16 @@ func (p *Parser) parseLineStatement() ast.Statement {
 			return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: vars, IsLineInput: true}
 		}
 		// Optional prompt string before `;` separator
+		prompt := ""
 		if p.curTokenIs(lexer.TOKEN_STRING) {
-			prompt := p.parseExpression(PREC_LOWEST)
+			prompt = p.curToken.Literal
+			p.nextToken()
 			if p.curTokenIs(lexer.TOKEN_SEMICOLON) || p.curTokenIs(lexer.TOKEN_COMMA) {
 				p.nextToken()
 			}
-			vars := p.parseExpressionList()
-			allVars := append([]ast.Expression{prompt}, vars...)
-			return &ast.ReadStatement{BasePos: pos, Variables: allVars}
 		}
 		vars := p.parseExpressionList()
-		return &ast.ReadStatement{BasePos: pos, Variables: vars}
+		return &ast.ReadStatement{BasePos: pos, Variables: vars, IsInput: true, Prompt: prompt, IsLineInput: true}
 	}
 
 	// LINE graphics: LINE [(x1,y1)]-(x2,y2) [, color] [, B[F]]

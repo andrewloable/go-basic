@@ -107,6 +107,9 @@ type CodeGenerator struct {
 
 	// needRng tracks whether the rng variable is needed.
 	needRng bool
+
+	// hasRead tracks whether any DATA READ statements exist (to emit dataPool).
+	hasRead bool
 }
 
 // New creates a fresh CodeGenerator ready for use.
@@ -149,8 +152,8 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	// Always import fmt (used by almost every BASIC program).
 	g.imports["fmt"] = true
 
-	// If we collected DATA, we need the data pool infrastructure.
-	hasData := len(g.dataPool) > 0
+	// If we have DATA statements or READ statements, we need the data pool infrastructure.
+	hasData := len(g.dataPool) > 0 || g.hasRead
 
 	// Build import block.
 	out.WriteString("import (\n")
@@ -236,6 +239,10 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			g.labelMap[fmt.Sprintf("%d", s.Number)] = true
 		case *ast.DataStatement:
 			g.dataPool = append(g.dataPool, s.Values...)
+		case *ast.ReadStatement:
+			if !s.IsInput {
+				g.hasRead = true
+			}
 
 		// Collect GOTO/GOSUB targets — these become goto labels in Go.
 		case *ast.GotoStatement:
@@ -590,17 +597,57 @@ func (g *CodeGenerator) emitPrintUsing(s *ast.PrintStatement) {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
-	name := mangleName(s.Name.Name + s.Name.TypeSuffix)
-	val := g.emitExpr(s.Value)
+	upperName := strings.ToUpper(s.Name.Name)
 
+	// RANDOMIZE is parsed as a LetStatement by the parser.
+	// Translate to an RNG seed call instead of a variable assignment.
+	if upperName == "RANDOMIZE" {
+		g.needRng = true
+		if s.Value != nil {
+			g.writeLinef("rng.Randomize(float64(%s))", g.emitExpr(s.Value))
+		} else {
+			g.writeLine("rng.Randomize(rt.Timer())")
+		}
+		return
+	}
+
+	// CALL statements are parsed as LetStatement where LHS name == RHS FunctionCall name.
+	// Detect this pattern and emit a plain function call (discarding the return value)
+	// rather than an assignment, to avoid "declared and not used" compile errors.
+	if fc, ok := s.Value.(*ast.FunctionCall); ok {
+		if upperName == strings.ToUpper(fc.Name) && s.Name.TypeSuffix == "" {
+			args := make([]string, 0, len(fc.Args))
+			for _, a := range fc.Args {
+				args = append(args, g.emitExpr(a))
+			}
+			g.writeLinef("%s(%s)", mangleName(fc.Name), strings.Join(args, ", "))
+			return
+		}
+	}
+
+	name := mangleName(s.Name.Name + s.Name.TypeSuffix)
+	goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
+
+	// For string type, don't wrap with a type cast (Go doesn't allow string(expr)
+	// on non-byte-slice values; string concatenation and fmt.Sprint handle coercion).
+	if goT == "string" {
+		val := g.emitExpr(s.Value)
+		if !g.declared[name] {
+			g.declared[name] = true
+			g.writeLinef("var %s string = %s", name, val)
+		} else {
+			g.writeLinef("%s = %s", name, val)
+		}
+		return
+	}
+
+	val := g.emitExpr(s.Value)
 	if !g.declared[name] {
 		g.declared[name] = true
-		goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
 		// Cast the value to the variable's type to handle mismatches between
 		// BASIC's implicit coercions and Go's strict typing.
 		g.writeLinef("var %s %s = %s(%s)", name, goT, goT, val)
 	} else {
-		goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
 		g.writeLinef("%s = %s(%s)", name, goT, val)
 	}
 }
@@ -924,9 +971,67 @@ func (g *CodeGenerator) emitRedim(s *ast.RedimStatement) {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitRead(s *ast.ReadStatement) {
+	// INPUT statement: read from stdin.
+	if s.IsInput {
+		g.emitInputFromStdin(s)
+		return
+	}
+
+	// DATA READ: read from the compile-time data pool.
 	for _, v := range s.Variables {
 		varExpr := g.emitExpr(v)
-		// Determine the target type from the variable name.
+		if ident, ok := v.(*ast.Identifier); ok {
+			name := mangleName(ident.Name + ident.TypeSuffix)
+			if !g.declared[name] {
+				goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+				g.writeLinef("var %s %s", name, goT)
+				g.declared[name] = true
+			}
+			goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+			if isStringType(ident.Name + ident.TypeSuffix) {
+				g.writeLinef("%s = fmt.Sprint(dataPool[dataIdx]); dataIdx++", varExpr)
+			} else {
+				// Cast tv_ to the target type to satisfy Go's strict type system.
+				g.imports["fmt"] = true
+				g.writeLinef("{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: %s = %s(tv_); case int: %s = %s(float64(tv_)); case string: %s = %s(rt.Val(tv_)); default: _ = tv_ } }", varExpr, goT, varExpr, goT, varExpr, goT)
+			}
+		} else {
+			g.writeLinef("_ = dataPool[dataIdx]; dataIdx++ // READ into %s", varExpr)
+		}
+	}
+}
+
+// emitInputFromStdin emits stdin-reading code for INPUT and LINE INPUT statements.
+// INPUT reads whitespace-delimited values; LINE INPUT reads the whole line.
+func (g *CodeGenerator) emitInputFromStdin(s *ast.ReadStatement) {
+	g.imports["fmt"] = true
+
+	// Print the prompt if there is one (INPUT "Prompt: "; var).
+	if s.Prompt != "" {
+		g.writeLinef("fmt.Print(%q)", s.Prompt)
+	}
+
+	if s.IsLineInput {
+		// LINE INPUT: read entire line into a single string variable.
+		g.imports["os"] = true
+		if len(s.Variables) > 0 {
+			varExpr := g.emitExpr(s.Variables[0])
+			if ident, ok := s.Variables[0].(*ast.Identifier); ok {
+				name := mangleName(ident.Name + ident.TypeSuffix)
+				if !g.declared[name] {
+					g.writeLinef("var %s string", name)
+					g.declared[name] = true
+				}
+			}
+			g.writeLine("{ scanner_ := rt.NewScanner(); scanner_.Scan()")
+			g.writeLinef("  %s = scanner_.Text() }", varExpr)
+		}
+		return
+	}
+
+	// Regular INPUT: read one or more values.
+	for _, v := range s.Variables {
+		varExpr := g.emitExpr(v)
 		if ident, ok := v.(*ast.Identifier); ok {
 			name := mangleName(ident.Name + ident.TypeSuffix)
 			if !g.declared[name] {
@@ -935,13 +1040,11 @@ func (g *CodeGenerator) emitRead(s *ast.ReadStatement) {
 				g.declared[name] = true
 			}
 			if isStringType(ident.Name + ident.TypeSuffix) {
-				g.writeLinef("%s = fmt.Sprint(dataPool[dataIdx]); dataIdx++", varExpr)
+				g.writeLine("{ scanner_ := rt.NewScanner(); scanner_.Scan()")
+				g.writeLinef("  %s = scanner_.Text() }", varExpr)
 			} else {
-				g.imports["fmt"] = true
-				g.writeLinef("{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: %s = tv_; case int: %s = float64(tv_); case string: %s = rt.Val(tv_); default: _ = tv_ } }", varExpr, varExpr, varExpr)
+				g.writeLinef("fmt.Scan(&%s)", varExpr)
 			}
-		} else {
-			g.writeLinef("_ = dataPool[dataIdx]; dataIdx++ // READ into %s", varExpr)
 		}
 	}
 }
@@ -1307,6 +1410,24 @@ func (g *CodeGenerator) emitExpr(expr ast.Expression) string {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitIdentifier(id *ast.Identifier) string {
+	// Some BASIC builtins are used without parentheses and look like plain
+	// variable references to the parser. Detect them here and emit the correct
+	// runtime calls instead of bare (undefined) variable names.
+	switch strings.ToUpper(id.Name + id.TypeSuffix) {
+	case "INKEY$":
+		return "rt.Inkey()"
+	case "DATE$":
+		return "rt.DateStr()"
+	case "TIME$":
+		return "rt.TimeStr()"
+	case "RND":
+		g.needRng = true
+		return "rng.Rnd(1)"
+	case "ERADR":
+		return "float64(0) /* ERADR: not applicable in transpiled code */"
+	case "TIMER":
+		return "rt.Timer()"
+	}
 	return mangleName(id.Name + id.TypeSuffix)
 }
 

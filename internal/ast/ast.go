@@ -381,10 +381,15 @@ func (n *DataStatement) statementNode()       {}
 func (n *DataStatement) TokenLiteral() string  { return "DATA" }
 func (n *DataStatement) Pos() Position         { return n.BasePos }
 
-// ReadStatement represents READ.
+// ReadStatement represents READ (from DATA pool) or INPUT (from stdin).
+// IsInput=true means this came from an INPUT/LINE INPUT statement and should
+// read from stdin rather than the DATA pool.
 type ReadStatement struct {
-	BasePos   Position
-	Variables []Expression
+	BasePos    Position
+	Variables  []Expression
+	IsInput    bool   // true for INPUT/LINE INPUT, false for DATA READ
+	Prompt     string // prompt string for INPUT (if any), already decoded
+	IsLineInput bool  // true for LINE INPUT (read whole line)
 }
 
 func (n *ReadStatement) statementNode()       {}

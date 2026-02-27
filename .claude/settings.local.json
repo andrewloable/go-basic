@@ -33,7 +33,8 @@
       "Bash(./basicc transpile:*)",
       "Bash(G:/projects/loabletech/go-basic/internal/ast/ast.go:*)",
       "Bash(./basicc_new transpile:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

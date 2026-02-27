@@ -36,12 +36,17 @@ docs/                Project documentation
 
 ## Expert Plugin
 
-For deep compiler/language knowledge, load the plugin:
-```
-claude --plugin-dir .claude/plugins/go-basic-expert
-```
-
-This provides the "Turbo BASIC Compiler Expert" skill with detailed references on:
+The `go-basic-expert` plugin provides the "Turbo BASIC Compiler Expert" skill with deep references on:
 - Compiler architecture (lexer, parser, AST, codegen, VM internals)
 - Turbo BASIC language (all types, statements, functions, graphics, file I/O)
 - Go codegen patterns (type casting, name mangling, emission patterns, known pitfalls)
+
+**First-time setup** (run once inside Claude Code):
+```
+/plugin install go-basic-expert@go-basic-plugins
+```
+
+**Or load without installing** (per-session):
+```
+claude --plugin-dir .claude/plugins/go-basic-expert
+```

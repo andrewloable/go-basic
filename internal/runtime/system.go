@@ -71,6 +71,32 @@ func Shell(command string) error {
 	return cmd.Run()
 }
 
+// Inkey returns the next character from the keyboard buffer without waiting.
+// Returns empty string if no key is available. In transpiled Go code this is
+// a stub — a real implementation would require raw terminal I/O (e.g. golang.org/x/term).
+func Inkey() string {
+	return ""
+}
+
+// Fre returns available heap memory as a rough estimate.
+// The argument follows BASIC convention: "" for string space, -1 for array space, -2 for stack.
+// In managed Go memory, this is an approximation.
+func Fre(_ float64) float64 {
+	return 32768 // Return a plausible constant; GC manages actual memory.
+}
+
+// Peek reads a byte from the given memory address. In DOS BASIC, PEEK accessed
+// real memory-mapped hardware. In transpiled Go code, memory addresses have no
+// meaning — always returns 0.
+func Peek(_ float64) float64 {
+	return 0
+}
+
+// Poke writes a byte to the given memory address. No-op in transpiled code.
+func Poke(_, _ float64) {
+	// Memory-mapped I/O is not available in transpiled Go code.
+}
+
 // SwapInt swaps two int values via pointers.
 // For transpiled code, swaps are generated inline as: a, b = b, a
 // This exists for the VM.
