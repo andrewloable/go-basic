@@ -20,3 +20,9 @@ Thumbs.db
 
 # Temp
 *.tmp
+
+# Dolt (local database server files)
+.dolt/
+.doltcfg/
+beads_go-basic/
+config.yaml
