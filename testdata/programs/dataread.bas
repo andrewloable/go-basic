@@ -1,0 +1,19 @@
+REM Test DATA/READ/RESTORE
+DATA 10, 20, 30, 40, 50
+
+PRINT "Reading data:"
+FOR i = 1 TO 5
+  READ x
+  PRINT x;
+NEXT i
+PRINT
+
+RESTORE
+PRINT "After RESTORE:"
+FOR i = 1 TO 3
+  READ x
+  PRINT x;
+NEXT i
+PRINT
+
+END

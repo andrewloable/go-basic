@@ -1,0 +1,18 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	rt "github.com/loabletech/go-basic/internal/runtime"
+)
+
+// Suppress unused import warnings.
+var _ = fmt.Sprintf
+var _ = os.Exit
+var _ = rt.Abs
+
+func main() {
+	fmt.Println("Hello, World!")
+	os.Exit(0)
+}

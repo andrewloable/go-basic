@@ -1,0 +1,33 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	rt "github.com/loabletech/go-basic/internal/runtime"
+)
+
+// Suppress unused import warnings.
+var _ = fmt.Sprintf
+var _ = os.Exit
+var _ = rt.Abs
+
+func main() {
+line_10:
+	// Classic BASIC with line numbers
+line_20:
+	fmt.Println("Line numbered program")
+line_30:
+	var I float32
+	end_0 := float64(5)
+	step_0 := 1
+	for I = float64(1); (step_0 > 0 && I <= end_0) || (step_0 < 0 && I >= end_0) || (step_0 == 0); I += step_0 {
+line_40:
+		fmt.Println("Count:", I)
+line_50:
+	}
+line_60:
+	fmt.Println("Done")
+line_70:
+	os.Exit(0)
+}

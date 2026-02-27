@@ -1,0 +1,35 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	rt "github.com/loabletech/go-basic/internal/runtime"
+)
+
+// Suppress unused import warnings.
+var _ = fmt.Sprintf
+var _ = os.Exit
+var _ = rt.Abs
+
+func main() {
+	// Test string functions
+	var s_str string = "Hello, World!"
+	fmt.Println("Original: ", s_str)
+	fmt.Println("Length:   ", rt.Len(s_str))
+	fmt.Println("Upper:    ", UCASE_str[int(s_str)])
+	fmt.Println("Lower:    ", LCASE_str[int(s_str)])
+	fmt.Println("Left 5:   ", LEFT_str[int(s_str)] /* TODO: multi-dim [s_str,float64(5)] */)
+	fmt.Println("Right 6:  ", RIGHT_str[int(s_str)] /* TODO: multi-dim [s_str,float64(6)] */)
+	fmt.Println("Mid 8,5:  ", MID_str[int(s_str)] /* TODO: multi-dim [s_str,float64(8),float64(5)] */)
+	fmt.Println("Trim:     ", LTRIM_str[int("  padded  ")])
+	fmt.Println("INSTR:    ", rt.Instr(1, s_str, "World"))
+	fmt.Println("CHR$(65): ", CHR_str[int(float64(65))])
+	fmt.Println("ASC(A):   ", func() int { v_, _ := rt.Asc("A"); return v_ }())
+	fmt.Println("STR$(42): ", STR_str[int(float64(42))])
+	fmt.Println("VAL:      ", rt.Val("3.14"))
+	fmt.Println("HEX$(255):", HEX_str[int(float64(255))])
+	fmt.Println("SPACE$(5): [", SPACE_str[int(float64(5))], "]")
+	fmt.Println("STRING$(3,42): ", STRING_str[int(float64(3))] /* TODO: multi-dim [float64(3),float64(42)] */)
+	os.Exit(0)
+}

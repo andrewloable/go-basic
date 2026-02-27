@@ -1,0 +1,22 @@
+# Binary
+basicc
+basicc.exe
+
+# Build artifacts
+coverage.out
+*.test
+*.pdf
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp

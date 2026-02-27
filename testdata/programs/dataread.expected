@@ -1,0 +1,49 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	rt "github.com/loabletech/go-basic/internal/runtime"
+)
+
+// Suppress unused import warnings.
+var _ = fmt.Sprintf
+var _ = os.Exit
+var _ = rt.Abs
+
+func main() {
+	var dataPool []interface{}
+	_ = dataPool
+	dataPool = []interface{}{
+		float64(10),
+		float64(20),
+		float64(30),
+		float64(40),
+		float64(50),
+	}
+	dataIdx := 0
+	_ = dataIdx
+	// Test DATA/READ/RESTORE
+	// DATA (values collected into dataPool)
+	fmt.Println("Reading data:")
+	var i float32
+	end_0 := float64(5)
+	step_0 := 1
+	for i = float64(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
+		var x float32
+		{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: x = tv_; case int: x = float64(tv_); case string: x = rt.Val(tv_); default: _ = tv_ } }
+		fmt.Print(x)
+	}
+	fmt.Println()
+	dataIdx = 0 // RESTORE
+	fmt.Println("After RESTORE:")
+	end_1 := float64(3)
+	step_1 := 1
+	for i = float64(1); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
+		{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: x = tv_; case int: x = float64(tv_); case string: x = rt.Val(tv_); default: _ = tv_ } }
+		fmt.Print(x)
+	}
+	fmt.Println()
+	os.Exit(0)
+}

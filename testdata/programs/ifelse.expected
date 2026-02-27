@@ -1,0 +1,32 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	rt "github.com/loabletech/go-basic/internal/runtime"
+)
+
+// Suppress unused import warnings.
+var _ = fmt.Sprintf
+var _ = os.Exit
+var _ = rt.Abs
+
+func main() {
+	// Test IF/THEN/ELSE constructs
+	var x float32 = float64(15)
+	if (x > float64(20)) {
+		fmt.Println("x is greater than 20")
+	} else if (x > float64(10)) {
+		fmt.Println("x is greater than 10")
+	} else if (x > float64(5)) {
+		fmt.Println("x is greater than 5")
+	} else {
+		fmt.Println("x is 5 or less")
+	}
+	//  Single-line IF
+	if (x == float64(15)) {
+		fmt.Println("x is exactly 15")
+	}
+	os.Exit(0)
+}
