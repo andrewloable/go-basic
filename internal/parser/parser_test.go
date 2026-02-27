@@ -495,3 +495,220 @@ func TestParseErrors(t *testing.T) {
 		t.Error("expected parse errors for 'IF THEN'")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests — each test documents a parser bug found while running
+// the example programs. Keep these to prevent regressions.
+// ---------------------------------------------------------------------------
+
+// TestRegressionCLEAR verifies that the CLEAR statement (which resets
+// variable memory) parses correctly. CLEAR was not a keyword before.
+func TestRegressionCLEAR(t *testing.T) {
+	_, errs := parse("CLEAR")
+	expectNoErrors(t, errs)
+	_, errs = parse("CLEAR 500")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionOnComputedGoto verifies multi-target ON expr GOTO parsing.
+// Before the fix, only ON EVENT GOSUB (KEY, TIMER, etc.) was handled.
+func TestRegressionOnComputedGoto(t *testing.T) {
+	_, errs := parse("ON choice GOTO Label1, Label2, Label3")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionOnComputedGosub verifies multi-target ON expr GOSUB parsing.
+func TestRegressionOnComputedGosub(t *testing.T) {
+	_, errs := parse("ON n GOSUB Sub1, Sub2, Sub3")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionPrintFileOutput verifies PRINT #n, expr for file output.
+// Previously only console PRINT was handled.
+func TestRegressionPrintFileOutput(t *testing.T) {
+	_, errs := parse(`OPEN "out.txt" FOR OUTPUT AS #1
+PRINT #1, "hello"
+CLOSE #1`)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionPrintImplicitConcat verifies PRINT with implicit concatenation
+// (adjacent items without a separator). Before the fix the parser stopped at
+// the first item and generated errors for subsequent tokens.
+func TestRegressionPrintImplicitConcat(t *testing.T) {
+	_, errs := parse(`PRINT a$ " world"`)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionPrintSemicolonComment verifies that a ; followed by a comment
+// does not cause the parser to expect another expression after the comment.
+func TestRegressionPrintSemicolonComment(t *testing.T) {
+	_, errs := parse("PRINT x; ' end of line comment")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionDimShared verifies that DIM SHARED (and LOCAL, STATIC, COMMON)
+// modifiers are consumed without being treated as the variable name.
+func TestRegressionDimShared(t *testing.T) {
+	_, errs := parse("DIM SHARED arr(1 TO 10) AS INTEGER")
+	expectNoErrors(t, errs)
+	_, errs = parse("DIM STATIC count AS LONG")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionDataUnquoted verifies that unquoted DATA values (strings
+// containing spaces or special characters) parse correctly.
+func TestRegressionDataUnquoted(t *testing.T) {
+	_, errs := parse("DATA Hello World, 42, Foo Bar")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionInputPrompt verifies that INPUT with a prompt string and
+// semicolon separator parses correctly (INPUT "Prompt: "; var).
+func TestRegressionInputPrompt(t *testing.T) {
+	_, errs := parse(`INPUT "Enter name: "; name$`)
+	expectNoErrors(t, errs)
+	_, errs = parse(`INPUT "Choose (1-3): ", choice`)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionLineInputPrompt verifies LINE INPUT with a prompt string.
+func TestRegressionLineInputPrompt(t *testing.T) {
+	_, errs := parse(`LINE INPUT "Enter line: "; text$`)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionDefSeg verifies DEF SEG with the optional = segment argument.
+func TestRegressionDefSeg(t *testing.T) {
+	_, errs := parse("DEF SEG = 0")
+	expectNoErrors(t, errs)
+	_, errs = parse("DEF SEG")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionPoke verifies POKE address, value parsing.
+// TOKEN_POKE existed in the lexer but had no parser handler before the fix.
+func TestRegressionPoke(t *testing.T) {
+	_, errs := parse("POKE 1047, 7")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionWidth verifies WIDTH statement parsing.
+func TestRegressionWidth(t *testing.T) {
+	_, errs := parse("WIDTH 80, 25")
+	expectNoErrors(t, errs)
+	_, errs = parse("WIDTH 40")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionConst verifies CONST name = expr parsing.
+func TestRegressionConst(t *testing.T) {
+	_, errs := parse("CONST PI = 3.14159")
+	expectNoErrors(t, errs)
+	_, errs = parse(`CONST APPNAME = "MyApp"`)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionTypeBlock verifies TYPE name ... END TYPE parsing.
+func TestRegressionTypeBlock(t *testing.T) {
+	input := `TYPE Point
+  X AS INTEGER
+  Y AS INTEGER
+END TYPE`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionDefFn verifies multi-line DEF FN and FN call in expressions.
+func TestRegressionDefFn(t *testing.T) {
+	input := `DEF FN Double(x) = x * 2
+y = FN Double(5)`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionMetacompilerDirectives verifies that $IF/$ENDIF/$DYNAMIC and
+// other metacompiler directives are consumed without error.
+// Turbo BASIC uses $ENDIF (not $END IF) as the block-closing directive.
+func TestRegressionMetacompilerDirectives(t *testing.T) {
+	input := `$DYNAMIC
+$IF %Debug THEN
+PRINT "debug"
+$ENDIF`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+	_, errs = parse("$STATIC")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionGraphicsPut verifies the graphics PUT (x,y), array, mode form.
+// Before the fix, the parser tried to handle it as file PUT.
+func TestRegressionGraphicsPut(t *testing.T) {
+	_, errs := parse("PUT (x, y), imgData, PSET")
+	expectNoErrors(t, errs)
+	_, errs = parse("PUT (x, y), imgData, PRESET")
+	expectNoErrors(t, errs)
+	_, errs = parse("PUT (x, y), imgData, XOR")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionGraphicsGet verifies the graphics GET (x1,y1)-(x2,y2), array form.
+func TestRegressionGraphicsGet(t *testing.T) {
+	_, errs := parse("GET (0, 0)-(100, 100), screen$")
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionEndInsideIfBlock verifies that a bare END (program terminator)
+// inside an IF block is not mistaken for END IF and does not close the block early.
+func TestRegressionEndInsideIfBlock(t *testing.T) {
+	input := `IF x = 1 THEN
+  PRINT "one"
+  END
+END IF`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionSubArrayParam verifies that SUB/FUNCTION declarations
+// accept array parameters with () notation and optional AS TypeName.
+func TestRegressionSubArrayParam(t *testing.T) {
+	input := `SUB FillArray (arr() AS INTEGER, size AS INTEGER)
+  FOR i = 1 TO size
+    arr(i) = 0
+  NEXT i
+END SUB`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionTypeFieldAccess verifies struct/TYPE field access (dot notation).
+// The "." character is TOKEN_ILLEGAL in BASIC but used for TYPE field access.
+func TestRegressionTypeFieldAccess(t *testing.T) {
+	input := `TYPE Point
+  X AS INTEGER
+  Y AS INTEGER
+END TYPE
+DIM p AS Point
+p.X = 10
+p.Y = 20
+PRINT p.X`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionTypeFieldArrayAccess verifies struct field access on an array element.
+func TestRegressionTypeFieldArrayAccess(t *testing.T) {
+	input := `DIM pts(10) AS Point
+pts(1).X = 5
+pts(1).Y = 3
+total = pts(1).X + pts(1).Y`
+	_, errs := parse(input)
+	expectNoErrors(t, errs)
+}
+
+// TestRegressionWriteHash verifies WRITE# n, expr... for file output.
+// The lexer fuses WRITE and # into the identifier "WRITE#".
+func TestRegressionWriteHash(t *testing.T) {
+	_, errs := parse(`WRITE# 1, "hello", 42`)
+	expectNoErrors(t, errs)
+}

@@ -1,3 +1,40 @@
+// Package parser implements Phase 2 of the Turbo BASIC compiler pipeline:
+// syntactic analysis (parsing). It consumes the token stream produced by the
+// lexer and builds an Abstract Syntax Tree (AST).
+//
+// # How a Parser Works
+//
+// A parser imposes grammatical structure on the flat token stream. Where the
+// lexer answers "what words are here?", the parser answers "how do those words
+// form sentences (statements) and phrases (expressions)?".
+//
+// This parser uses two well-known techniques:
+//
+//  1. RECURSIVE DESCENT for statements — each BASIC keyword gets its own
+//     parseXxx() method that handles the specific grammar rule. The top-level
+//     parseStatement() is a big switch on the current token type that
+//     dispatches to the right handler.
+//
+//  2. PRATT PARSING (top-down operator precedence) for expressions — rather
+//     than writing one recursive descent function per precedence level, we
+//     assign each token a numeric precedence and drive a single loop. This
+//     elegantly handles left-associativity, right-associativity, and mixed
+//     precedence without deeply nested functions.
+//
+// # Two-Token Lookahead
+//
+// The parser always holds two tokens: curToken (current) and peekToken (next).
+// Two tokens are enough for Turbo BASIC because most grammatical decisions can
+// be made by looking one token ahead — e.g., seeing PRINT tells us this is a
+// print statement; seeing an identifier followed by '(' means it is a function
+// call or array access rather than a plain variable reference.
+//
+// # Error Recovery
+//
+// When a parse error is detected, the parser records the error via addError()
+// and calls skipToEndOfLine() to discard the rest of the malformed statement.
+// This "panic-mode recovery" strategy allows the parser to continue past errors
+// and report multiple problems in a single pass.
 package parser
 
 import (
@@ -9,18 +46,20 @@ import (
 	"github.com/loabletech/go-basic/internal/lexer"
 )
 
-// Parser transforms a stream of tokens into an AST.
+// Parser holds the state needed during a single-pass parse.
+// The two-token window (curToken + peekToken) is the only look-ahead needed.
 type Parser struct {
 	l         *lexer.Lexer
-	curToken  lexer.Token
-	peekToken lexer.Token
+	curToken  lexer.Token // token currently being examined
+	peekToken lexer.Token // next token (one position ahead)
 	errors    []string
 }
 
 // New creates a new Parser for the given lexer.
 func New(l *lexer.Lexer) *Parser {
 	p := &Parser{l: l}
-	// Read two tokens so curToken and peekToken are both set.
+	// Prime the two-token window: call nextToken twice so both curToken and
+	// peekToken hold real tokens before ParseProgram starts.
 	p.nextToken()
 	p.nextToken()
 	return p
@@ -107,7 +146,16 @@ func (p *Parser) skipToEndOfLine() {
 	}
 }
 
-// parseStatement dispatches to the correct statement parser based on the current token.
+// parseStatement is the top-level statement dispatcher. It examines the
+// current token type and routes to the appropriate parseXxx() method.
+//
+// This is the core of recursive-descent parsing for statements: each BASIC
+// keyword maps to exactly one grammar rule, and each rule has its own method.
+// New statement types are added here (and nowhere else in the top-level flow).
+//
+// For identifiers that are not keywords (variables, user sub calls, etc.) we
+// fall through to parseIdentifierStatement() which tries both assignment and
+// procedure-call forms.
 func (p *Parser) parseStatement() ast.Statement {
 	switch p.curToken.Type {
 	case lexer.TOKEN_COMMENT:
@@ -190,6 +238,28 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseWriteStatement()
 	case lexer.TOKEN_CLS:
 		return p.parseClsStatement()
+	case lexer.TOKEN_CLEAR:
+		pos := p.curPos()
+		p.nextToken()
+		// CLEAR may have optional stack/segment arguments — skip them
+		p.skipToEndOfLine()
+		return &ast.ClearStatement{BasePos: pos}
+	case lexer.TOKEN_TYPE:
+		return p.parseTypeBlock()
+	case lexer.TOKEN_CONST:
+		return p.parseConstStatement()
+	case lexer.TOKEN_FN:
+		return p.parseFnAssign()
+	case lexer.TOKEN_DOLLAR, lexer.TOKEN_PERCENT,
+		lexer.TOKEN_META_DYNAMIC, lexer.TOKEN_META_STATIC, lexer.TOKEN_META_INCLUDE,
+		lexer.TOKEN_META_IF, lexer.TOKEN_META_ELSEIF, lexer.TOKEN_META_ELSE,
+		lexer.TOKEN_META_ENDIF, lexer.TOKEN_META_COM, lexer.TOKEN_META_SOUND,
+		lexer.TOKEN_META_STACK, lexer.TOKEN_META_SEGMENT, lexer.TOKEN_META_INLINE,
+		lexer.TOKEN_META_EVENT:
+		// Metacompiler directives ($IF, $DYNAMIC, %DEFINE, etc.) — skip line.
+		// These are compile-time conditionals with no runtime equivalent.
+		p.skipToEndOfLine()
+		return nil
 	case lexer.TOKEN_LOCATE:
 		return p.parseLocateStatement()
 	case lexer.TOKEN_COLOR:
@@ -250,6 +320,18 @@ func (p *Parser) parseStatement() ast.Statement {
 		pos := p.curPos()
 		p.nextToken()
 		return &ast.RemStatement{BasePos: pos, Text: "TROFF"}
+	case lexer.TOKEN_POKE:
+		return p.parsePokeStatement()
+	case lexer.TOKEN_WIDTH:
+		pos := p.curPos()
+		p.nextToken() // skip WIDTH
+		// WIDTH col [, row] — set console/screen width; consumed but emitted as no-op
+		p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			p.parseExpression(PREC_LOWEST)
+		}
+		return &ast.RemStatement{BasePos: pos, Text: "WIDTH"}
 	case lexer.TOKEN_DELAY:
 		return p.parseDelayStatement()
 	case lexer.TOKEN_VIEW:
@@ -268,26 +350,48 @@ func (p *Parser) parseStatement() ast.Statement {
 }
 
 // ---------------------------------------------------------------------------
-// Expression parsing (Pratt parser)
+// Expression parsing — Pratt / top-down operator precedence (TDOP)
 // ---------------------------------------------------------------------------
+//
+// Classic recursive descent builds one parsing function per precedence level
+// (parseMulDiv calls parseUnary which calls parseAtom, etc.). That works, but
+// adding a new operator requires restructuring several functions.
+//
+// The Pratt technique (invented by Vaughan Pratt, 1973) is cleaner:
+//
+//  1. Assign each token type a *binding power* (precedence number).
+//  2. A single parseExpression(minPrec) loop keeps consuming infix operators
+//     as long as the next operator's precedence is higher than minPrec.
+//  3. Prefix handlers (numbers, identifiers, unary minus) are called once at
+//     the start; infix handlers (binary +, -, *, …) chain onto the left side.
+//
+// Example: parsing "2 + 3 * 4"
+//   - parseExpression(PREC_LOWEST) calls parsePrefixExpression → NumberLiteral(2)
+//   - curToken is '+' (PREC_ADD=8 > PREC_LOWEST=1) → enter loop
+//   - parseInfixExpression calls parseExpression(PREC_ADD) for the right side
+//     - parsePrefixExpression → NumberLiteral(3)
+//     - curToken is '*' (PREC_MUL=11 > PREC_ADD=8) → enter inner loop
+//     - parseInfixExpression calls parseExpression(PREC_MUL) → NumberLiteral(4)
+//     - returns BinaryExpr(3 * 4)
+//   - returns BinaryExpr(2 + (3*4))  ← correct precedence, no extra functions!
 
-// Precedence levels for Turbo BASIC operators.
+// Precedence levels for Turbo BASIC operators (higher = tighter binding).
 const (
 	_ int = iota
 	PREC_LOWEST
-	PREC_IMP    // IMP
-	PREC_EQV    // EQV
-	PREC_XOR    // XOR
-	PREC_OR     // OR
-	PREC_AND    // AND
-	PREC_NOT    // NOT (unary, but binds tighter than AND)
-	PREC_REL    // = <> < > <= >=
-	PREC_ADD    // + -
-	PREC_MOD    // MOD
-	PREC_IDIV   // \ (integer division)
-	PREC_MUL    // * /
-	PREC_UNARY  // unary -
-	PREC_POWER  // ^
+	PREC_IMP    // IMP  (logical implication — lowest operator)
+	PREC_EQV    // EQV  (logical equivalence)
+	PREC_XOR    // XOR  (bitwise/logical exclusive or)
+	PREC_OR     // OR   (bitwise/logical or)
+	PREC_AND    // AND  (bitwise/logical and)
+	PREC_NOT    // NOT  (unary, but binds tighter than AND)
+	PREC_REL    // = <> < > <= >=  (relational comparisons)
+	PREC_ADD    // + -  (additive)
+	PREC_MOD    // MOD  (modulo)
+	PREC_IDIV   // \    (integer division)
+	PREC_MUL    // * /  (multiplicative — tighter than additive)
+	PREC_UNARY  // unary - (prefix minus)
+	PREC_POWER  // ^    (exponentiation — tightest binary operator)
 )
 
 func tokenPrecedence(t lexer.TokenType) int {
@@ -318,13 +422,20 @@ func tokenPrecedence(t lexer.TokenType) int {
 	return PREC_LOWEST
 }
 
-// parseExpression parses an expression with the given minimum precedence.
+// parseExpression is the heart of the Pratt parser.
+// It parses an expression whose root operator has precedence > the given floor.
+//
+// The loop invariant: curToken is always the *next* operator (or end-of-expr).
+// Each iteration "absorbs" one infix operator and its right operand, building
+// a left-leaning expression tree that respects operator precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
-	left := p.parsePrefixExpression()
+	left := p.parsePrefixExpression() // Parse the leftmost primary/unary
 	if left == nil {
 		return nil
 	}
 
+	// Keep consuming infix operators as long as they bind tighter than our floor.
+	// EOL and COLON are statement terminators — they always stop expression parsing.
 	for p.curToken.Type != lexer.TOKEN_EOF &&
 		p.curToken.Type != lexer.TOKEN_EOL &&
 		p.curToken.Type != lexer.TOKEN_COLON &&
@@ -339,7 +450,9 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 	return left
 }
 
-// parsePrefixExpression parses unary prefix expressions and primary expressions.
+// parsePrefixExpression handles the *start* of an expression — either a primary
+// value (number, string, identifier) or a prefix/unary operator (-, NOT).
+// In Pratt terminology, these are the "null-denotation" (nud) handlers.
 func (p *Parser) parsePrefixExpression() ast.Expression {
 	switch p.curToken.Type {
 	case lexer.TOKEN_INTEGER, lexer.TOKEN_LONG, lexer.TOKEN_SINGLE, lexer.TOKEN_DOUBLE:
@@ -362,6 +475,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		lexer.TOKEN_LBOUND, lexer.TOKEN_UBOUND, lexer.TOKEN_SCREEN,
 		lexer.TOKEN_VARPTR, lexer.TOKEN_VARSEG:
 		return p.parseBuiltinFunction()
+	// FN name(args) call in expression context
+	case lexer.TOKEN_FN:
+		return p.parseFnCallExpression()
 	default:
 		p.addError("unexpected token in expression: %s (%q)", lexer.TokenName(p.curToken.Type), p.curToken.Literal)
 		p.nextToken()
@@ -369,7 +485,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	}
 }
 
-// parseInfixExpression parses a binary infix expression.
+// parseInfixExpression handles binary operators ("+", "-", "AND", …).
+// In Pratt terminology these are the "left-denotation" (led) handlers.
+// The left operand has already been parsed and is passed in as `left`.
 func (p *Parser) parseInfixExpression(left ast.Expression) ast.Expression {
 	pos := p.curPos()
 	operator := p.curToken.Literal
@@ -445,7 +563,19 @@ func (p *Parser) parseStringLiteral() ast.Expression {
 	return &ast.StringLiteral{BasePos: pos, Value: val}
 }
 
-// parseIdentifierExpression parses an identifier, which may be a variable, array access, or function call.
+// parseIdentifierExpression handles the ambiguity between variable references,
+// array accesses, and function calls — all of which start with an identifier:
+//
+//   x           → Identifier (variable read)
+//   arr(i)      → ArrayAccess (array element) or FunctionCall (user/built-in fn)
+//   arr(i).fld  → FieldAccessExpression (TYPE struct field)
+//
+// BASIC uses the same syntax for array indexing and function calls (both use
+// parentheses), so the distinction is deferred to semantic analysis. Here we
+// return an ArrayAccess node for all identifier(...) forms; the semantic pass
+// will reclassify them if the name is a known function.
+//
+// It also handles struct/TYPE member access (dot notation): expr.field or expr.field(idx).
 func (p *Parser) parseIdentifierExpression() ast.Expression {
 	pos := p.curPos()
 	name := p.curToken.Literal
@@ -463,6 +593,7 @@ func (p *Parser) parseIdentifierExpression() ast.Expression {
 	p.nextToken()
 
 	// Check for array access or function call: name(args)
+	var expr ast.Expression
 	if p.curTokenIs(lexer.TOKEN_LPAREN) {
 		p.nextToken() // skip (
 		args := p.parseExpressionList()
@@ -471,17 +602,61 @@ func (p *Parser) parseIdentifierExpression() ast.Expression {
 		} else {
 			p.nextToken() // skip )
 		}
-		// If name is uppercase and looks like a built-in, treat as function call
+		// If name is uppercase and looks like a built-in, treat as function call.
+		// Also treat DEF FN functions (names starting with "FN") as function calls.
+		// IMPORTANT: include the typeSuffix in the lookup — many BASIC built-ins
+		// end in "$" (e.g., CHR$, LEFT$, MID$) which was stripped earlier.
 		upper := strings.ToUpper(name)
-		if isBuiltinFunction(upper) {
-			return &ast.FunctionCall{BasePos: pos, Name: upper + typeSuffix, Args: args}
+		fullName := upper + typeSuffix
+		if isBuiltinFunction(fullName) {
+			expr = &ast.FunctionCall{BasePos: pos, Name: fullName, Args: args}
+		} else if isBuiltinFunction(upper) {
+			expr = &ast.FunctionCall{BasePos: pos, Name: upper + typeSuffix, Args: args}
+		} else if strings.HasPrefix(upper, "FN") {
+			// Turbo BASIC convention: DEF FN functions are named with "FN" prefix.
+			// FNFoo(args) calls the user-defined function FNFoo.
+			expr = &ast.FunctionCall{BasePos: pos, Name: name + typeSuffix, Args: args}
+		} else {
+			// Could be array access or user function — use ArrayAccess for now
+			// (semantic analysis will distinguish)
+			expr = &ast.ArrayAccess{BasePos: pos, Name: name, TypeSuffix: typeSuffix, Indices: args}
 		}
-		// Could be array access or user function — use ArrayAccess for now
-		// (semantic analysis will distinguish)
-		return &ast.ArrayAccess{BasePos: pos, Name: name, TypeSuffix: typeSuffix, Indices: args}
+	} else {
+		expr = &ast.Identifier{BasePos: pos, Name: name, TypeSuffix: typeSuffix}
 	}
 
-	return &ast.Identifier{BasePos: pos, Name: name, TypeSuffix: typeSuffix}
+	// Handle struct/TYPE member access: expr.field or expr.field(idx).
+	// The "." character is lexed as TOKEN_ILLEGAL in Turbo BASIC since BASIC
+	// does not normally use dot notation — it is only valid for TYPE fields.
+	for p.curToken.Type == lexer.TOKEN_ILLEGAL && p.curToken.Literal == "." {
+		p.nextToken() // skip .
+		if !p.curTokenIs(lexer.TOKEN_IDENTIFIER) {
+			break
+		}
+		fieldName := p.curToken.Literal
+		// Strip type suffix from field name (e.g., XCoor%)
+		if len(fieldName) > 0 {
+			last := fieldName[len(fieldName)-1]
+			if last == '%' || last == '&' || last == '!' || last == '#' || last == '$' {
+				fieldName = fieldName[:len(fieldName)-1]
+			}
+		}
+		p.nextToken()
+		fa := &ast.FieldAccessExpression{BasePos: pos, Object: expr, Field: fieldName}
+		// Check for subscript on the field: .field(idx)
+		if p.curTokenIs(lexer.TOKEN_LPAREN) {
+			p.nextToken() // skip (
+			args := p.parseExpressionList()
+			if p.curTokenIs(lexer.TOKEN_RPAREN) {
+				p.nextToken()
+			}
+			expr = &ast.ArrayAccess{BasePos: pos, Name: fa.Field, Indices: args}
+		} else {
+			expr = fa
+		}
+	}
+
+	return expr
 }
 
 // parseGroupExpression parses a parenthesized expression.
@@ -595,6 +770,27 @@ func (p *Parser) parsePrintStatement() ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip PRINT/LPRINT
 
+	// PRINT #n, expr ... — file output
+	if p.curTokenIs(lexer.TOKEN_HASH) {
+		p.nextToken() // skip #
+		fileNum := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+		exprs := p.parsePrintExprList()
+		hasSep := false
+		if len(exprs.Separators) > 0 && len(exprs.Separators) >= len(exprs.Expressions) {
+			hasSep = true
+		}
+		return &ast.FilePrintStatement{
+			BasePos:        pos,
+			FileNum:        fileNum,
+			Expressions:    exprs.Expressions,
+			Separators:     exprs.Separators,
+			HasTrailingSep: hasSep,
+		}
+	}
+
 	stmt := &ast.PrintStatement{BasePos: pos}
 
 	// Check for PRINT USING
@@ -606,23 +802,9 @@ func (p *Parser) parsePrintStatement() ast.Statement {
 		}
 	}
 
-	// Parse expression list with separators
-	for !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) && !p.curTokenIs(lexer.TOKEN_COLON) {
-		expr := p.parseExpression(PREC_LOWEST)
-		if expr != nil {
-			stmt.Expressions = append(stmt.Expressions, expr)
-		}
-
-		if p.curTokenIs(lexer.TOKEN_COMMA) {
-			stmt.Separators = append(stmt.Separators, ",")
-			p.nextToken()
-		} else if p.curTokenIs(lexer.TOKEN_SEMICOLON) {
-			stmt.Separators = append(stmt.Separators, ";")
-			p.nextToken()
-		} else {
-			break
-		}
-	}
+	exprs := p.parsePrintExprList()
+	stmt.Expressions = exprs.Expressions
+	stmt.Separators = exprs.Separators
 
 	// Check for trailing separator (suppress newline)
 	if len(stmt.Separators) > 0 && len(stmt.Separators) >= len(stmt.Expressions) {
@@ -630,6 +812,54 @@ func (p *Parser) parsePrintStatement() ast.Statement {
 	}
 
 	return stmt
+}
+
+// printExprResult holds the parsed expressions and separators for a PRINT statement.
+type printExprResult struct {
+	Expressions []ast.Expression
+	Separators  []string
+}
+
+// parsePrintExprList parses a PRINT expression list, handling `,`, `;`, and implicit
+// concatenation (adjacent expressions without a separator, treated as `;`).
+func (p *Parser) parsePrintExprList() printExprResult {
+	var r printExprResult
+	for !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) &&
+		!p.curTokenIs(lexer.TOKEN_COLON) && !p.curTokenIs(lexer.TOKEN_COMMENT) {
+		expr := p.parseExpression(PREC_LOWEST)
+		if expr != nil {
+			r.Expressions = append(r.Expressions, expr)
+		}
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			r.Separators = append(r.Separators, ",")
+			p.nextToken()
+		} else if p.curTokenIs(lexer.TOKEN_SEMICOLON) {
+			r.Separators = append(r.Separators, ";")
+			p.nextToken()
+		} else if canStartExpression(p.curToken.Type) {
+			// Implicit concatenation: adjacent expressions treated as `;`
+			r.Separators = append(r.Separators, ";")
+		} else {
+			break
+		}
+	}
+	return r
+}
+
+// canStartExpression returns true if the token type can begin an expression.
+func canStartExpression(t lexer.TokenType) bool {
+	switch t {
+	case lexer.TOKEN_INTEGER, lexer.TOKEN_LONG, lexer.TOKEN_SINGLE, lexer.TOKEN_DOUBLE,
+		lexer.TOKEN_STRING, lexer.TOKEN_IDENTIFIER, lexer.TOKEN_LPAREN,
+		lexer.TOKEN_MINUS, lexer.TOKEN_NOT,
+		lexer.TOKEN_HEX, lexer.TOKEN_OCTAL, lexer.TOKEN_BINARY_LIT,
+		lexer.TOKEN_LEN_KW, lexer.TOKEN_EOF_KW, lexer.TOKEN_TAB, lexer.TOKEN_SPC,
+		lexer.TOKEN_PEEK, lexer.TOKEN_INP, lexer.TOKEN_TIMER, lexer.TOKEN_INSTAT,
+		lexer.TOKEN_LBOUND, lexer.TOKEN_UBOUND, lexer.TOKEN_SCREEN,
+		lexer.TOKEN_VARPTR, lexer.TOKEN_VARSEG, lexer.TOKEN_FN:
+		return true
+	}
+	return false
 }
 
 func (p *Parser) parseLetStatement() ast.Statement {
@@ -663,6 +893,10 @@ func (p *Parser) parseAssignment(pos ast.Position) ast.Statement {
 	}
 	if ident, ok := nameExpr.(*ast.Identifier); ok {
 		return &ast.LetStatement{BasePos: pos, Name: ident, Value: value}
+	}
+	// Struct/TYPE field assignment: expr.field = value
+	if fa, ok := nameExpr.(*ast.FieldAccessExpression); ok {
+		return &ast.FieldAssignStatement{BasePos: pos, Object: fa.Object, Field: fa.Field, Value: value}
 	}
 
 	p.addError("invalid assignment target")
@@ -992,6 +1226,13 @@ func (p *Parser) parseDimStatement(isRedim bool) ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip DIM/REDIM
 
+	// Skip optional scope modifiers: SHARED, LOCAL, STATIC, COMMON, DYNAMIC
+	for p.curTokenIs(lexer.TOKEN_SHARED) || p.curTokenIs(lexer.TOKEN_LOCAL) ||
+		p.curTokenIs(lexer.TOKEN_STATIC) || p.curTokenIs(lexer.TOKEN_COMMON) ||
+		(p.curTokenIs(lexer.TOKEN_IDENTIFIER) && strings.ToUpper(p.curToken.Literal) == "DYNAMIC") {
+		p.nextToken()
+	}
+
 	var decls []ast.DimDecl
 
 	for {
@@ -1181,6 +1422,15 @@ func (p *Parser) parseParameterList() []ast.Parameter {
 		param.Name = p.curToken.Literal
 		p.nextToken()
 
+		// Handle array parameter marker: paramName() — the () indicates the param
+		// is passed as an array reference (e.g., SUB Foo (arr() AS Integer))
+		if p.curTokenIs(lexer.TOKEN_LPAREN) {
+			p.nextToken() // skip (
+			if p.curTokenIs(lexer.TOKEN_RPAREN) {
+				p.nextToken() // skip )
+			}
+		}
+
 		if p.curTokenIs(lexer.TOKEN_AS) {
 			p.nextToken()
 			param.Type = strings.ToUpper(p.curToken.Literal)
@@ -1212,10 +1462,13 @@ func (p *Parser) parseDefStatement() ast.Statement {
 		return nil
 	}
 
-	// Handle DEF SEG
+	// Handle DEF SEG [= segment]
 	if strings.ToUpper(p.curToken.Literal) == "SEG" {
 		p.nextToken()
-		// DEF SEG = segment or DEF SEG (reset)
+		if p.curTokenIs(lexer.TOKEN_EQ) {
+			p.nextToken() // skip =
+			p.parseExpression(PREC_LOWEST) // consume but discard segment address
+		}
 		return &ast.RemStatement{BasePos: pos, Text: "DEF SEG"}
 	}
 
@@ -1257,7 +1510,7 @@ func (p *Parser) parseDataStatement() ast.Statement {
 
 	var values []ast.Expression
 	for !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) {
-		val := p.parseExpression(PREC_LOWEST)
+		val := p.parseDataValue()
 		if val != nil {
 			values = append(values, val)
 		}
@@ -1269,6 +1522,47 @@ func (p *Parser) parseDataStatement() ast.Statement {
 	}
 
 	return &ast.DataStatement{BasePos: pos, Values: values}
+}
+
+// parseDataValue reads a single DATA item. Quoted strings and numeric literals
+// are parsed normally. Unquoted strings (identifiers, operators, etc.) are
+// collected as a raw string value up to the next comma or end of line.
+func (p *Parser) parseDataValue() ast.Expression {
+	valPos := p.curPos()
+	switch p.curToken.Type {
+	case lexer.TOKEN_STRING:
+		return p.parseStringLiteral()
+	case lexer.TOKEN_INTEGER, lexer.TOKEN_LONG, lexer.TOKEN_SINGLE, lexer.TOKEN_DOUBLE:
+		return p.parseNumberLiteral()
+	case lexer.TOKEN_MINUS:
+		// Negative numeric literal
+		p.nextToken()
+		if p.curTokenIs(lexer.TOKEN_INTEGER) || p.curTokenIs(lexer.TOKEN_LONG) ||
+			p.curTokenIs(lexer.TOKEN_SINGLE) || p.curTokenIs(lexer.TOKEN_DOUBLE) {
+			num := p.parseNumberLiteral()
+			if nl, ok := num.(*ast.NumberLiteral); ok {
+				nl.Value = -nl.Value
+				return nl
+			}
+		}
+		return &ast.StringLiteral{BasePos: valPos, Value: "-"}
+	default:
+		// Unquoted DATA value: collect all tokens up to comma/EOL as a raw string
+		var sb strings.Builder
+		for !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) &&
+			!p.curTokenIs(lexer.TOKEN_COMMA) {
+			if sb.Len() > 0 {
+				sb.WriteByte(' ')
+			}
+			sb.WriteString(p.curToken.Literal)
+			p.nextToken()
+		}
+		raw := strings.TrimSpace(sb.String())
+		if raw == "" {
+			return nil
+		}
+		return &ast.StringLiteral{BasePos: valPos, Value: raw}
+	}
 }
 
 func (p *Parser) parseReadStatement() ast.Statement {
@@ -1345,6 +1639,7 @@ func (p *Parser) parseOnStatement() ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip ON
 
+	// ON ERROR GOTO target
 	if p.curTokenIs(lexer.TOKEN_ERROR) {
 		p.nextToken() // skip ERROR
 		if p.curTokenIs(lexer.TOKEN_GOTO) {
@@ -1355,31 +1650,66 @@ func (p *Parser) parseOnStatement() ast.Statement {
 		}
 	}
 
-	// ON KEY(n) GOSUB, ON TIMER(n) GOSUB, etc.
-	eventType := strings.ToUpper(p.curToken.Literal)
-	p.nextToken()
-
-	var eventParam ast.Expression
-	if p.curTokenIs(lexer.TOKEN_LPAREN) {
+	// Peek ahead: if a known event keyword (KEY, TIMER, STRIG, etc.) is followed
+	// by LPAREN or directly GOSUB/GOTO with a single target, it is an event handler.
+	// Otherwise treat as computed ON expr GOTO/GOSUB target1[, target2, ...].
+	eventKeywords := map[string]bool{
+		"KEY": true, "TIMER": true, "STRIG": true, "PLAY": true, "PEN": true,
+		"COM": true, "UEVENT": true,
+	}
+	candidate := strings.ToUpper(p.curToken.Literal)
+	if eventKeywords[candidate] {
+		eventType := candidate
 		p.nextToken()
-		eventParam = p.parseExpression(PREC_LOWEST)
-		if p.curTokenIs(lexer.TOKEN_RPAREN) {
+		var eventParam ast.Expression
+		if p.curTokenIs(lexer.TOKEN_LPAREN) {
 			p.nextToken()
+			eventParam = p.parseExpression(PREC_LOWEST)
+			if p.curTokenIs(lexer.TOKEN_RPAREN) {
+				p.nextToken()
+			}
+		}
+		if p.curTokenIs(lexer.TOKEN_GOSUB) {
+			p.nextToken()
+			target := p.curToken.Literal
+			p.nextToken()
+			return &ast.OnEventGosubStatement{
+				BasePos: pos, EventType: eventType, EventParam: eventParam, Target: target,
+			}
 		}
 	}
 
+	// Computed ON expr GOTO/GOSUB target1, target2, ...
+	expr := p.parseExpression(PREC_LOWEST)
+	if p.curTokenIs(lexer.TOKEN_GOTO) {
+		p.nextToken() // skip GOTO
+		targets := p.parseTargetList()
+		return &ast.OnComputedGotoStatement{BasePos: pos, Expr: expr, Targets: targets}
+	}
 	if p.curTokenIs(lexer.TOKEN_GOSUB) {
-		p.nextToken()
-		target := p.curToken.Literal
-		p.nextToken()
-		return &ast.OnEventGosubStatement{
-			BasePos: pos, EventType: eventType, EventParam: eventParam, Target: target,
-		}
+		p.nextToken() // skip GOSUB
+		targets := p.parseTargetList()
+		return &ast.OnComputedGosubStatement{BasePos: pos, Expr: expr, Targets: targets}
 	}
 
-	p.addError("expected GOTO or GOSUB after ON")
+	p.addError("expected GOTO or GOSUB after ON expression")
 	p.skipToEndOfLine()
 	return nil
+}
+
+// parseTargetList parses a comma-separated list of GOTO/GOSUB targets (labels or line numbers).
+func (p *Parser) parseTargetList() []string {
+	var targets []string
+	for !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) && !p.curTokenIs(lexer.TOKEN_COLON) {
+		targets = append(targets, p.curToken.Literal)
+		p.nextToken()
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		} else {
+			break
+		}
+	}
+	return targets
 }
 
 func (p *Parser) parseResumeStatement() ast.Statement {
@@ -1480,8 +1810,19 @@ func (p *Parser) parseInputStatement() ast.Statement {
 		return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: vars}
 	}
 
-	// Regular INPUT with optional prompt
-	// The first expression could be a prompt string followed by ; or ,
+	// Regular INPUT: optional prompt string followed by `;` or `,`
+	// e.g.: INPUT "Enter value: ";x  or  INPUT "Enter value: ", x  or  INPUT x
+	if p.curTokenIs(lexer.TOKEN_STRING) {
+		// Peek ahead: if the next token after the string is `;` or `,` then it's a prompt
+		prompt := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_SEMICOLON) || p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken() // skip prompt separator
+		}
+		vars := p.parseExpressionList()
+		// Prepend prompt as first "variable" so codegen can print it
+		allVars := append([]ast.Expression{prompt}, vars...)
+		return &ast.ReadStatement{BasePos: pos, Variables: allVars}
+	}
 	vars := p.parseExpressionList()
 	return &ast.ReadStatement{BasePos: pos, Variables: vars}
 }
@@ -1501,6 +1842,16 @@ func (p *Parser) parseLineStatement() ast.Statement {
 			}
 			vars := p.parseExpressionList()
 			return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: vars, IsLineInput: true}
+		}
+		// Optional prompt string before `;` separator
+		if p.curTokenIs(lexer.TOKEN_STRING) {
+			prompt := p.parseExpression(PREC_LOWEST)
+			if p.curTokenIs(lexer.TOKEN_SEMICOLON) || p.curTokenIs(lexer.TOKEN_COMMA) {
+				p.nextToken()
+			}
+			vars := p.parseExpressionList()
+			allVars := append([]ast.Expression{prompt}, vars...)
+			return &ast.ReadStatement{BasePos: pos, Variables: allVars}
 		}
 		vars := p.parseExpressionList()
 		return &ast.ReadStatement{BasePos: pos, Variables: vars}
@@ -1865,6 +2216,41 @@ func (p *Parser) parsePaintStatement() ast.Statement {
 func (p *Parser) parseGetStatement() ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip GET
+
+	// Graphics GET: GET (x1, y1)-(x2, y2), arrayVar
+	// File GET:     GET [#]filenum [, recnum] [, variable]
+	if p.curTokenIs(lexer.TOKEN_LPAREN) {
+		// Graphics GET — consume (x1, y1)-(x2, y2), array and emit as no-op
+		p.nextToken() // skip (
+		p.parseExpression(PREC_LOWEST) // x1
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+		p.parseExpression(PREC_LOWEST) // y1
+		if p.curTokenIs(lexer.TOKEN_RPAREN) {
+			p.nextToken() // skip )
+		}
+		if p.curTokenIs(lexer.TOKEN_MINUS) {
+			p.nextToken() // skip - (step separator)
+		}
+		if p.curTokenIs(lexer.TOKEN_LPAREN) {
+			p.nextToken() // skip (
+			p.parseExpression(PREC_LOWEST) // x2
+			if p.curTokenIs(lexer.TOKEN_COMMA) {
+				p.nextToken()
+			}
+			p.parseExpression(PREC_LOWEST) // y2
+			if p.curTokenIs(lexer.TOKEN_RPAREN) {
+				p.nextToken() // skip )
+			}
+		}
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			p.parseExpression(PREC_LOWEST) // arrayVar
+		}
+		return &ast.RemStatement{BasePos: pos, Text: "GET (graphics)"}
+	}
+
 	if p.curTokenIs(lexer.TOKEN_HASH) {
 		p.nextToken()
 	}
@@ -1886,6 +2272,44 @@ func (p *Parser) parseGetStatement() ast.Statement {
 func (p *Parser) parsePutStatement() ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip PUT
+
+	// Graphics PUT: PUT (x, y), arrayVar [, mode]
+	// File PUT:     PUT [#]filenum [, recnum] [, variable]
+	if p.curTokenIs(lexer.TOKEN_LPAREN) {
+		// Graphics PUT — parse (x, y) coordinate pair
+		p.nextToken() // skip (
+		x := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+		y := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_RPAREN) {
+			p.nextToken() // skip )
+		}
+		var arrayVar, mode ast.Expression
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			arrayVar = p.parseExpression(PREC_LOWEST)
+		}
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			// Graphics mode is a keyword (PSET, PRESET, AND, OR, XOR) — not a normal
+			// expression, so consume the token directly rather than calling parseExpression.
+			switch p.curToken.Type {
+			case lexer.TOKEN_PSET, lexer.TOKEN_PRESET, lexer.TOKEN_AND, lexer.TOKEN_OR, lexer.TOKEN_XOR:
+				modeIdent := &ast.Identifier{BasePos: p.curPos(), Name: p.curToken.Literal}
+				mode = modeIdent
+				p.nextToken()
+			default:
+				mode = p.parseExpression(PREC_LOWEST)
+			}
+		}
+		// Emit as a no-op graphics statement (not yet implemented in transpiler)
+		_ = x; _ = y; _ = arrayVar; _ = mode
+		return &ast.RemStatement{BasePos: pos, Text: "PUT (graphics)"}
+	}
+
+	// File PUT
 	if p.curTokenIs(lexer.TOKEN_HASH) {
 		p.nextToken()
 	}
@@ -2050,8 +2474,55 @@ func (p *Parser) parseIdentifierStatement() ast.Statement {
 		return &ast.LineNumberStatement{BasePos: pos, Number: num}
 	}
 
+	// Handle identifiers that are tokenized with type-suffix characters but
+	// are actually special statement keywords.
+	upper := strings.ToUpper(p.curToken.Literal)
+	switch upper {
+	case "WRITE#":
+		// WRITE# n, expr, ... — file write (lexer fuses WRITE and # into WRITE#)
+		p.nextToken() // skip WRITE#
+		fileNum := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+		exprs := p.parseExpressionList()
+		return &ast.FileWriteStatement{BasePos: pos, FileNum: fileNum, Expressions: exprs}
+	case "PUT$":
+		// PUT$ filenum, data$ — binary file put
+		p.nextToken()
+		fileNum := p.parseExpression(PREC_LOWEST)
+		if p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+		data := p.parseExpression(PREC_LOWEST)
+		return &ast.FilePrintStatement{BasePos: pos, FileNum: fileNum, Expressions: []ast.Expression{data}}
+	case "GET$":
+		// GET$ filenum, length, var$ — binary file get
+		p.nextToken()
+		fileNum := p.parseExpression(PREC_LOWEST)
+		var args []ast.Expression
+		for p.curTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			args = append(args, p.parseExpression(PREC_LOWEST))
+		}
+		return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: args}
+	}
+
 	// Identifier — could be assignment or sub call
 	return p.parseAssignment(pos)
+}
+
+// isEndBlock returns true if the current END token is a block-closing keyword
+// (END IF, END SELECT, END SUB, END FUNCTION, END DEF, END TYPE).
+// A bare END on its own line is a program-termination statement, not a block closer.
+func (p *Parser) isEndBlock() bool {
+	next := p.peekToken
+	return next.Type == lexer.TOKEN_IF ||
+		next.Type == lexer.TOKEN_SELECT ||
+		next.Type == lexer.TOKEN_SUB ||
+		next.Type == lexer.TOKEN_FUNCTION ||
+		next.Type == lexer.TOKEN_DEF ||
+		next.Type == lexer.TOKEN_TYPE
 }
 
 // parseBlockUntil parses statements until one of the terminating tokens is found.
@@ -2063,9 +2534,15 @@ func (p *Parser) parseBlockUntil(terminators ...lexer.TokenType) []ast.Statement
 			break
 		}
 
-		// Check for terminators
+		// Check for terminators.
+		// Special case: TOKEN_END is only a block terminator if followed by
+		// a block-closing keyword (IF, SELECT, SUB, FUNCTION, DEF).
+		// A bare END (program-end statement) should be parsed normally.
 		for _, t := range terminators {
 			if p.curToken.Type == t {
+				if t == lexer.TOKEN_END && !p.isEndBlock() {
+					break // Not a block closer — fall through to parseStatement
+				}
 				return stmts
 			}
 		}
@@ -2103,4 +2580,131 @@ func (p *Parser) parseIdentifierAsIdent() *ast.Identifier {
 	}
 	p.nextToken()
 	return &ast.Identifier{BasePos: pos, Name: name, TypeSuffix: typeSuffix}
+}
+
+// parseTypeBlock parses a TYPE name ... END TYPE user-defined type declaration.
+// Fields have the form: fieldname AS typename
+func (p *Parser) parseTypeBlock() ast.Statement {
+	pos := p.curPos()
+	p.nextToken() // skip TYPE
+	name := p.curToken.Literal
+	p.nextToken()
+	// skip to end of line after type name
+	p.skipToEndOfLine()
+
+	var fields []ast.TypeField
+	for !p.curTokenIs(lexer.TOKEN_EOF) {
+		if p.curTokenIs(lexer.TOKEN_EOL) {
+			p.nextToken()
+			continue
+		}
+		if p.curTokenIs(lexer.TOKEN_END) {
+			p.nextToken() // skip END
+			// skip TYPE
+			if strings.ToUpper(p.curToken.Literal) == "TYPE" || p.curTokenIs(lexer.TOKEN_TYPE) {
+				p.nextToken()
+			}
+			break
+		}
+		fieldName := p.curToken.Literal
+		p.nextToken()
+		typeName := ""
+		if p.curTokenIs(lexer.TOKEN_AS) {
+			p.nextToken() // skip AS
+			typeName = strings.ToUpper(p.curToken.Literal)
+			p.nextToken()
+		}
+		if fieldName != "" {
+			fields = append(fields, ast.TypeField{Name: fieldName, TypeName: typeName})
+		}
+		p.skipToEndOfLine()
+	}
+	return &ast.TypeBlockStatement{BasePos: pos, Name: name, Fields: fields}
+}
+
+// parseFnAssign parses FN name = expr (return value assignment inside a DEF FN block)
+// or FN name(args) as a standalone call (discard return value).
+func (p *Parser) parseFnAssign() ast.Statement {
+	pos := p.curPos()
+	p.nextToken() // skip FN
+	name := p.curToken.Literal
+	// Strip type suffix if present (FNname$ etc.)
+	if len(name) > 0 {
+		last := name[len(name)-1]
+		if last == '$' || last == '%' || last == '!' || last == '#' || last == '&' {
+			name = name[:len(name)-1]
+		}
+	}
+	p.nextToken() // skip name
+	if p.curTokenIs(lexer.TOKEN_EQ) {
+		p.nextToken() // skip =
+		val := p.parseExpression(PREC_LOWEST)
+		return &ast.FnAssignStatement{BasePos: pos, Name: name, Value: val}
+	}
+	// FN name(args) as a standalone call — use LetStatement with a dummy target
+	var args []ast.Expression
+	if p.curTokenIs(lexer.TOKEN_LPAREN) {
+		p.nextToken()
+		args = p.parseExpressionList()
+		if p.curTokenIs(lexer.TOKEN_RPAREN) {
+			p.nextToken()
+		}
+	}
+	call := &ast.FnCallExpression{BasePos: pos, Name: name, Args: args}
+	return &ast.LetStatement{
+		BasePos: pos,
+		Name:    &ast.Identifier{BasePos: pos, Name: "_fn_" + name},
+		Value:   call,
+	}
+}
+
+// parsePokeStatement parses POKE address, value.
+func (p *Parser) parsePokeStatement() ast.Statement {
+	pos := p.curPos()
+	p.nextToken() // skip POKE
+	addr := p.parseExpression(PREC_LOWEST)
+	if p.curTokenIs(lexer.TOKEN_COMMA) {
+		p.nextToken()
+	}
+	val := p.parseExpression(PREC_LOWEST)
+	return &ast.PokeStatement{BasePos: pos, Address: addr, Value: val}
+}
+
+// parseConstStatement parses CONST name = expr (compile-time constant declaration).
+// In the transpiled Go output this becomes a regular variable assignment; the
+// semantic distinction is preserved in the AST for potential optimisation.
+func (p *Parser) parseConstStatement() ast.Statement {
+	pos := p.curPos()
+	p.nextToken() // skip CONST
+	name := p.curToken.Literal
+	p.nextToken() // skip name
+	if p.curTokenIs(lexer.TOKEN_EQ) {
+		p.nextToken() // skip =
+	}
+	val := p.parseExpression(PREC_LOWEST)
+	return &ast.ConstStatement{BasePos: pos, Name: name, Value: val}
+}
+
+// parseFnCallExpression parses FN name(args) in an expression context.
+func (p *Parser) parseFnCallExpression() ast.Expression {
+	pos := p.curPos()
+	p.nextToken() // skip FN
+	name := p.curToken.Literal
+	// Strip type suffix if present (FNname$ etc.)
+	if len(name) > 0 {
+		last := name[len(name)-1]
+		if last == '$' || last == '%' || last == '!' || last == '#' || last == '&' {
+			name = name[:len(name)-1]
+		}
+	}
+	p.nextToken()
+	var args []ast.Expression
+	if p.curTokenIs(lexer.TOKEN_LPAREN) {
+		p.nextToken()
+		args = p.parseExpressionList()
+		if p.curTokenIs(lexer.TOKEN_RPAREN) {
+			p.nextToken()
+		}
+	}
+	return &ast.FnCallExpression{BasePos: pos, Name: name, Args: args}
 }

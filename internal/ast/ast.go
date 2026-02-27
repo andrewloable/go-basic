@@ -1,3 +1,35 @@
+// Package ast defines the Abstract Syntax Tree (AST) node types produced by
+// the parser (Phase 2) and consumed by all later phases.
+//
+// # What is an Abstract Syntax Tree?
+//
+// An AST is a tree representation of the grammatical structure of source code.
+// Unlike a Parse Tree (which mirrors every token and grammar rule), the AST is
+// "abstract" — it omits syntactic noise (parentheses, commas, keywords that
+// only provide structure) and keeps only the semantically meaningful pieces.
+//
+//   BASIC source:   FOR i = 1 TO 10 STEP 2
+//   AST node:       ForStatement{ Var: "i", Start: 1, End: 10, Step: 2, Body: [...] }
+//
+// # Node hierarchy
+//
+// Every AST node implements the Node interface. Nodes fall into two categories:
+//
+//   Statement nodes  (statementNode marker method) — represent actions:
+//     LET, PRINT, FOR…NEXT, IF…THEN, GOSUB, SUB declarations, …
+//
+//   Expression nodes (expressionNode marker method) — represent values:
+//     NumberLiteral, StringLiteral, Identifier, BinaryExpr, FunctionCall, …
+//
+// Programs are sequences of statements; statements contain expressions.
+//
+// # Visitor pattern
+//
+// Later compiler phases (semantic analysis, code generation, VM compilation)
+// walk the AST using Go type-switches. Each phase matches on concrete node
+// types and implements the transformation it needs. This "visitor without
+// visitors" pattern is idiomatic Go and avoids the boilerplate of explicit
+// Visitor interfaces.
 package ast
 
 // ---------------------------------------------------------------------------
@@ -610,11 +642,12 @@ func (n *FileInputStatement) Pos() Position         { return n.BasePos }
 
 // FilePrintStatement represents PRINT#.
 type FilePrintStatement struct {
-	BasePos     Position
-	FileNum     Expression
-	Expressions []Expression
-	Separators  []string
-	Format      Expression
+	BasePos        Position
+	FileNum        Expression
+	Expressions    []Expression
+	Separators     []string
+	Format         Expression
+	HasTrailingSep bool
 }
 
 func (n *FilePrintStatement) statementNode()       {}
@@ -970,3 +1003,120 @@ type OnEventGosubStatement struct {
 func (n *OnEventGosubStatement) statementNode()       {}
 func (n *OnEventGosubStatement) TokenLiteral() string  { return "ON" }
 func (n *OnEventGosubStatement) Pos() Position         { return n.BasePos }
+
+// PokeStatement represents POKE address, value (write byte to memory).
+type PokeStatement struct {
+	BasePos  Position
+	Address  Expression
+	Value    Expression
+}
+
+func (n *PokeStatement) statementNode()       {}
+func (n *PokeStatement) TokenLiteral() string  { return "POKE" }
+func (n *PokeStatement) Pos() Position         { return n.BasePos }
+
+// ConstStatement represents CONST name = expr (compile-time constant).
+type ConstStatement struct {
+	BasePos Position
+	Name    string
+	Value   Expression
+}
+
+func (n *ConstStatement) statementNode()       {}
+func (n *ConstStatement) TokenLiteral() string  { return "CONST" }
+func (n *ConstStatement) Pos() Position         { return n.BasePos }
+
+// ClearStatement represents the CLEAR statement (resets all variables).
+type ClearStatement struct {
+	BasePos Position
+}
+
+func (n *ClearStatement) statementNode()       {}
+func (n *ClearStatement) TokenLiteral() string  { return "CLEAR" }
+func (n *ClearStatement) Pos() Position         { return n.BasePos }
+
+// OnComputedGotoStatement represents ON expr GOTO t1, t2, t3 ...
+type OnComputedGotoStatement struct {
+	BasePos Position
+	Expr    Expression
+	Targets []string
+}
+
+func (n *OnComputedGotoStatement) statementNode()       {}
+func (n *OnComputedGotoStatement) TokenLiteral() string  { return "ON GOTO" }
+func (n *OnComputedGotoStatement) Pos() Position         { return n.BasePos }
+
+// OnComputedGosubStatement represents ON expr GOSUB t1, t2, t3 ...
+type OnComputedGosubStatement struct {
+	BasePos Position
+	Expr    Expression
+	Targets []string
+}
+
+func (n *OnComputedGosubStatement) statementNode()       {}
+func (n *OnComputedGosubStatement) TokenLiteral() string  { return "ON GOSUB" }
+func (n *OnComputedGosubStatement) Pos() Position         { return n.BasePos }
+
+// TypeBlockStatement represents a TYPE name ... END TYPE user-defined type.
+type TypeBlockStatement struct {
+	BasePos Position
+	Name    string
+	Fields  []TypeField
+}
+
+// TypeField represents a single field in a TYPE block.
+type TypeField struct {
+	Name     string
+	TypeName string
+}
+
+func (n *TypeBlockStatement) statementNode()       {}
+func (n *TypeBlockStatement) TokenLiteral() string  { return "TYPE" }
+func (n *TypeBlockStatement) Pos() Position         { return n.BasePos }
+
+// FnAssignStatement represents FN name = expr inside a DEF FN block (return value assignment).
+type FnAssignStatement struct {
+	BasePos Position
+	Name    string
+	Value   Expression
+}
+
+func (n *FnAssignStatement) statementNode()       {}
+func (n *FnAssignStatement) TokenLiteral() string  { return "FN" }
+func (n *FnAssignStatement) Pos() Position         { return n.BasePos }
+
+// FnCallExpression represents FN name(args) in expression context.
+type FnCallExpression struct {
+	BasePos Position
+	Name    string
+	Args    []Expression
+}
+
+func (n *FnCallExpression) expressionNode()       {}
+func (n *FnCallExpression) TokenLiteral() string  { return "FN" }
+func (n *FnCallExpression) Pos() Position         { return n.BasePos }
+
+// FieldAccessExpression represents struct/TYPE member access: expr.field
+// In Turbo BASIC, the TYPE keyword defines record types whose fields are
+// accessed with dot notation — e.g., Point.X, BCoor(i).XCoor.
+type FieldAccessExpression struct {
+	BasePos Position
+	Object  Expression // the base expression (identifier or array access)
+	Field   string     // the field name
+}
+
+func (n *FieldAccessExpression) expressionNode()       {}
+func (n *FieldAccessExpression) TokenLiteral() string  { return "." }
+func (n *FieldAccessExpression) Pos() Position         { return n.BasePos }
+
+// FieldAssignStatement represents struct/TYPE member assignment: expr.field = value
+type FieldAssignStatement struct {
+	BasePos Position
+	Object  Expression // the base expression
+	Field   string     // the field name
+	Value   Expression // the value to assign
+}
+
+func (n *FieldAssignStatement) statementNode()       {}
+func (n *FieldAssignStatement) TokenLiteral() string  { return "." }
+func (n *FieldAssignStatement) Pos() Position         { return n.BasePos }

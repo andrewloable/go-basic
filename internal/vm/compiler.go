@@ -1,3 +1,54 @@
+// Package vm contains a bytecode compiler and its accompanying virtual machine.
+//
+// # Bytecode Compilation vs. Transpilation
+//
+// A transpiler (like the one in internal/transpiler) converts an AST directly
+// into source code for another high-level language (e.g., BASIC → Go).  A
+// bytecode compiler instead lowers the AST into a compact sequence of
+// numbered instructions — the bytecode — that a purpose-built virtual machine
+// (VM) interprets at runtime.  Bytecode sits between source code and native
+// machine code: it is easier to generate than native code yet much faster for
+// a VM to dispatch than re-parsing source on every execution.
+//
+// # The Stack-Based VM Model
+//
+// This VM is stack-based.  Every instruction operates on an implicit operand
+// stack rather than named registers.  For example, to evaluate "A + B" the VM
+// pushes the value of A, pushes the value of B, then executes OpAdd, which
+// pops both values, adds them, and pushes the result.  The final result of any
+// expression is always left on top of the stack for the next instruction to
+// consume.  This model is simple to implement and to compile for because the
+// compiler never has to manage register allocation.
+//
+// # Opcodes
+//
+// An opcode is a small integer (see opcode.go) that uniquely identifies one VM
+// operation — OpPush, OpAdd, OpJmpFalse, etc.  Each instruction in the
+// bytecode stream is a (Opcode, Operand, Line) triple stored as a flat array
+// in Chunk.Code.  The operand is a 32-bit integer whose meaning depends on the
+// opcode: it may be a constant-pool index, a variable index, a jump target
+// address, or a built-in function ID.
+//
+// # Labels and Backpatching
+//
+// When the compiler encounters a forward jump (e.g., the jump that skips the
+// THEN block when an IF condition is false) it does not yet know the target
+// address because the destination code has not been emitted yet.  The solution
+// is to emit the jump instruction immediately with a placeholder operand of 0
+// and record the instruction's index.  Once the destination is known (after
+// emitting all intermediate code) the compiler "backpatches" the placeholder
+// by writing the real address into the operand field.  See patchJump(),
+// labelPatches, and subPatches for the two flavours of backpatching used here.
+//
+// # Symbol Table / Variable Indices
+//
+// Variables are not stored in a hash map at runtime.  Instead, each unique
+// variable name is interned into the constant pool as a string value, and its
+// index in that pool (an int32) becomes the variable's identifier throughout
+// the bytecode.  OpStore <idx> writes the top-of-stack into the VM's variable
+// array at position <idx>; OpLoad <idx> pushes the current value back.  The
+// compiler's varIndex map (name → constant-pool index) is the compile-time
+// symbol table that performs this mapping.
 package vm
 
 import (
@@ -163,6 +214,32 @@ func (c *Compiler) collectData(stmts []ast.Statement) {
 
 // ---------------------------------------------------------------------------
 // Emit helpers
+//
+// These helpers form the low-level interface between the compile* methods and
+// the Chunk (the bytecode buffer).  The most important pair is emitJump /
+// patchJump, which together implement backpatching — the technique used
+// whenever a jump instruction must be emitted before its target address is
+// known.
+//
+// How backpatching works, step by step:
+//
+//  1. emitJump(OpJmpFalse, line) appends the instruction to Chunk.Code with
+//     operand = 0 (a placeholder) and returns the index of that instruction
+//     in the Code slice.  The caller stores this index.
+//
+//  2. The compiler continues emitting subsequent instructions (the branch body,
+//     the else block, etc.).  The Code slice grows; the placeholder sits in
+//     the middle with the wrong address.
+//
+//  3. Once the target address is known — i.e., the current length of
+//     Chunk.Code — the caller invokes patchJump(savedIndex).  patchJump
+//     writes len(Chunk.Code) into the saved instruction's Operand field,
+//     replacing the placeholder with the real target address.
+//
+// This two-step emit-then-patch strategy is standard in single-pass bytecode
+// compilers.  Whenever you see a variable named *Jump or *Addr holding the
+// return value of emitJump, you know a backpatch is coming once the target
+// location is emitted.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) emit(op Opcode, operand int32, line int) int {
@@ -234,6 +311,16 @@ func (c *Compiler) findLoop(loopType string) *loopInfo {
 
 // ---------------------------------------------------------------------------
 // Statement compilation
+//
+// compileStatement is the heart of the AST visitor pattern for bytecode
+// emission.  The compiler walks every node in the AST and, for each concrete
+// statement type, calls the appropriate compile* helper.  Each helper is
+// responsible for emitting the exact sequence of opcodes that implements that
+// statement's semantics on the stack-based VM.
+//
+// The visitor approach keeps the compiler open for extension: adding support
+// for a new statement type means adding one case here and writing a new
+// compile* method — no existing code needs to change.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileStatement(stmt ast.Statement) {
@@ -308,8 +395,17 @@ func (c *Compiler) compileStatement(stmt ast.Statement) {
 		}
 	case *ast.DefTypeStatement,
 		*ast.OptionBaseStatement,
-		*ast.ScopeStatement:
-		// Handled by the semantic analyzer; no bytecode needed.
+		*ast.ScopeStatement,
+		*ast.ClearStatement,
+		*ast.TypeBlockStatement,
+		*ast.FnAssignStatement,
+		*ast.OnComputedGotoStatement,
+		*ast.OnComputedGosubStatement,
+		*ast.ConstStatement,
+		*ast.PokeStatement,
+		*ast.FieldAssignStatement:
+		// Emit NOP for statement types not yet supported in VM.
+		c.emit(OpNop, 0, line)
 	default:
 		// Emit NOP for unimplemented statement types so the instruction
 		// stream keeps correct position information.
@@ -319,6 +415,17 @@ func (c *Compiler) compileStatement(stmt ast.Statement) {
 
 // ---------------------------------------------------------------------------
 // PRINT
+//
+// compilePrint demonstrates the general pattern for statement compilation:
+//   1. Recursively compile each sub-expression — this leaves a value on the
+//      stack for each expression in the PRINT list.
+//   2. Emit the OpPrint opcode to pop and display that value.
+//   3. Emit formatting opcodes (OpPrintTab, OpPrintSemicolon) based on the
+//      separator character between items.
+//   4. Emit OpPrintNewline at the end unless a trailing separator suppresses it.
+//
+// No explicit control flow is needed here because PRINT is a straight-line
+// statement; every instruction executes in sequence.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compilePrint(s *ast.PrintStatement) {
@@ -363,6 +470,24 @@ func (c *Compiler) compileLet(s *ast.LetStatement) {
 
 // ---------------------------------------------------------------------------
 // IF / ELSEIF / ELSE
+//
+// Conditional control flow is implemented with two jump opcodes:
+//   - OpJmpFalse <addr>  — pops the stack; jumps if the value is falsy.
+//   - OpJmp      <addr>  — unconditional jump (used to skip the ELSE branch).
+//
+// The compilation strategy for IF/ELSEIF/ELSE follows this pattern:
+//
+//   [compile condition]
+//   OpJmpFalse → falseJump  (placeholder; patched after THEN block is emitted)
+//   [compile THEN body]
+//   OpJmp      → endJump    (placeholder; patched after all branches are emitted)
+//   <falseJump lands here>
+//   [compile ELSEIF / ELSE bodies, each with their own falseJump / endJump]
+//   <all endJumps land here>
+//
+// Because the THEN block's length is unknown when we first emit OpJmpFalse,
+// we use backpatching: emit the jump with operand 0 and record the index so
+// we can fill in the real target once we know where the next section starts.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileIf(s *ast.IfStatement) {
@@ -415,6 +540,30 @@ func (c *Compiler) compileIf(s *ast.IfStatement) {
 
 // ---------------------------------------------------------------------------
 // FOR / NEXT
+//
+// FOR loops are the most complex control-flow construct because the step value
+// can be positive or negative, which determines the loop-exit direction.  The
+// emitted bytecode structure is:
+//
+//   [init: counter = start; hidden __step_var = step]
+//   <loopStart:>
+//   [push step; push 0; OpGe]      ← is step >= 0?
+//   OpJmpFalse → negJump
+//   [push counter; push end; OpGt] ← positive step: exit if counter > end
+//   OpJmpTrue  → exitPosJump
+//   OpJmp      → bodyJump          ← fall through to body
+//   <negJump lands here>
+//   [push counter; push end; OpLt] ← negative step: exit if counter < end
+//   OpJmpTrue  → exitNegJump
+//   <bodyJump lands here>
+//   [body statements]
+//   [counter = counter + step]
+//   OpJmp → loopStart              ← back-edge (known address, no patch needed)
+//   <exitPosJump / exitNegJump / break jumps all land here>
+//
+// EXIT FOR works by emitting an OpJmp with a placeholder operand and storing
+// the instruction's index in loopInfo.breakJumps.  All break jumps are
+// backpatched to loopEnd after the NEXT is processed.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileFor(s *ast.ForStatement) {
@@ -492,6 +641,19 @@ func (c *Compiler) compileFor(s *ast.ForStatement) {
 
 // ---------------------------------------------------------------------------
 // WHILE / WEND
+//
+// WHILE is the simplest loop: emit the condition test at the top, jump out on
+// false, run the body, then jump unconditionally back to the condition test.
+// The back-edge target (loopStart) is already known when we emit OpJmp, so no
+// backpatching is required for that jump.  Only the exit jump (OpJmpFalse) and
+// any EXIT WHILE jumps need patching, which happens after the body is emitted.
+//
+//   <loopStart:>
+//   [compile condition]
+//   OpJmpFalse → exitJump   (patched to loopEnd)
+//   [body statements]
+//   OpJmp → loopStart       (direct back-edge, no patch needed)
+//   <exitJump / break jumps land here>
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileWhile(s *ast.WhileStatement) {
@@ -519,6 +681,19 @@ func (c *Compiler) compileWhile(s *ast.WhileStatement) {
 
 // ---------------------------------------------------------------------------
 // DO / LOOP
+//
+// DO loops support four variants that share the same compilation skeleton:
+//   - DO WHILE <cond> … LOOP  (test at top, exit when false)
+//   - DO UNTIL <cond> … LOOP  (test at top, exit when true)
+//   - DO … LOOP WHILE <cond>  (test at bottom, exit when false)
+//   - DO … LOOP UNTIL <cond>  (test at bottom, exit when true)
+//   - DO … LOOP               (infinite; requires EXIT DO to escape)
+//
+// For top-tested loops a forward exit jump is emitted before the body and
+// must be backpatched once the loop end is known.  For bottom-tested loops the
+// back-edge conditional jump is emitted after the body; since loopStart is
+// already recorded its address is written directly into the operand without
+// needing a patch list.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileDoLoop(s *ast.DoLoopStatement) {
@@ -938,6 +1113,21 @@ func (c *Compiler) compileDecr(s *ast.DecrStatement) {
 
 // ---------------------------------------------------------------------------
 // Expression compilation
+//
+// Every expression in a stack-based VM is compiled into a sequence of
+// "push / operate" instructions that leaves exactly one value on the stack:
+//
+//   Literal      → OpPush <constant-pool-index>
+//   Variable     → OpLoad <variable-index>
+//   a + b        → [compile a] [compile b] OpAdd
+//   f(x)         → [compile x] OpBuiltin <id>   (or OpCall for user functions)
+//   (a + b) * c  → [compile a] [compile b] OpAdd [compile c] OpMul
+//
+// Because expressions are compiled recursively and each sub-expression leaves
+// its result on the stack, the operands for any operator are always sitting
+// on top of the stack in the correct order when the operator's opcode is
+// reached.  This is why operand stacks and recursive descent compile so
+// naturally together.
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileExpression(expr ast.Expression) {
@@ -965,6 +1155,16 @@ func (c *Compiler) compileExpression(expr ast.Expression) {
 		c.compileFunctionCall(e)
 	case *ast.ArrayAccess:
 		c.compileArrayAccess(e)
+	case *ast.FnCallExpression:
+		// DEF FN call — emit a NOP placeholder (not yet supported in VM)
+		c.emit(OpNop, 0, e.Pos().Line)
+		idx := c.addConstant(FloatVal(0))
+		c.emit(OpPush, idx, e.Pos().Line)
+	case *ast.FieldAccessExpression:
+		// TYPE field access — emit a NOP placeholder (not yet supported in VM)
+		c.emit(OpNop, 0, e.Pos().Line)
+		idx := c.addConstant(FloatVal(0))
+		c.emit(OpPush, idx, e.Pos().Line)
 	default:
 		c.addError("unsupported expression type %T", expr)
 	}
@@ -981,6 +1181,18 @@ func (c *Compiler) compileNumberLiteral(n *ast.NumberLiteral) {
 	c.emit(OpPush, idx, n.Pos().Line)
 }
 
+// compileBinaryExpr compiles a binary (two-operand) expression.
+//
+// Operator dispatch: after both operands are on the stack the operator string
+// is mapped to a single opcode.  Every arithmetic, relational, and logical
+// operator in BASIC has a dedicated opcode (OpAdd, OpEq, OpAnd, …) so the VM
+// can implement each operation in a tight native switch with no string
+// comparisons at runtime — all the string-to-opcode translation happens here,
+// once, at compile time.
+//
+// The compilation order — left then right — ensures that when the VM pops the
+// two operands the left-hand value was pushed first, which matters for
+// non-commutative operators like subtraction and division.
 func (c *Compiler) compileBinaryExpr(e *ast.BinaryExpr) {
 	line := e.Pos().Line
 
@@ -1117,6 +1329,22 @@ var builtinMap = map[string]BuiltinID{
 	"SPC":     BuiltinSpc,
 }
 
+// compileFunctionCall compiles a function-call expression.
+//
+// Built-in functions (ABS, SQR, LEFT$, …) are resolved at compile time via
+// builtinMap.  Each built-in is assigned a numeric BuiltinID.  The call
+// compiles to:
+//   [compile each argument in order]   ← args land on stack left-to-right
+//   OpBuiltin <BuiltinID>              ← VM pops args, runs native Go code,
+//                                         pushes the result
+//
+// Using a numeric ID instead of a string name means the VM's dispatch loop
+// only needs an integer switch — no hash lookups at runtime.
+//
+// User-defined functions (SUB/FUNCTION) compile to OpCall <addr>, where
+// <addr> is the instruction index of the function body.  If the function has
+// not been declared yet (forward reference) the address is recorded as a
+// subPatch and backpatched after all declarations are compiled.
 func (c *Compiler) compileFunctionCall(fc *ast.FunctionCall) {
 	line := fc.Pos().Line
 	name := strings.ToUpper(fc.Name)

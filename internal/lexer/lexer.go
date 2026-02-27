@@ -1,9 +1,63 @@
+// Package lexer implements Phase 1 of compilation: Lexical Analysis (also called
+// lexing, scanning, or tokenizing).
+//
+// # What the lexer does
+//
+// The lexer transforms raw source text (a flat stream of characters) into a
+// structured stream of Token objects. Each Token carries three pieces of data:
+//
+//   - Type     – a symbolic category (e.g. TOKEN_INTEGER, TOKEN_IDENTIFIER, TOKEN_PLUS)
+//   - Literal  – the exact text slice from the source (e.g. "42", "myVar%", "+")
+//   - Position – the (line, column) coordinates for error reporting
+//
+// The parser (Phase 2) never sees raw characters; it only sees this token stream.
+// This clean separation of concerns keeps the grammar rules in the parser simple.
+//
+// # Design goal: single-pass scanning
+//
+// The lexer reads the input exactly once, left-to-right, one byte at a time.
+// Two cursor fields – pos (current byte) and readPos (next byte) – implement a
+// one-character look-ahead window via peekChar(). This is sufficient to resolve
+// all ambiguities in Turbo BASIC syntax without backtracking.
+//
+// # Turbo BASIC peculiarities handled here
+//
+//   - Type suffixes on literals: 42& (long), 3.14! (single), 1.0# (double), 99% (integer)
+//   - Type suffixes on identifiers: count% (integer var), name$ (string var)
+//   - Alternate-radix literals: &H1F (hex), &O77 (octal), &B1010 (binary)
+//   - Two comment styles: REM ... and ' ...
+//   - Metacommands: $INCLUDE, $DYNAMIC, $STATIC, etc. (only at line start)
+//   - Line-start label detection: an identifier followed by ':' becomes TOKEN_LABEL
+//   - Exponent suffixes: 1.5E3 (single-precision), 1.5D3 (double-precision)
+//   - Multi-character operators: <>, <=, >=
+//   - Platform line endings: CR, LF, and CR+LF are all normalised to TOKEN_EOL
 package lexer
 
 import (
 	"strings"
 	"unicode"
 )
+
+// # Lexer state
+//
+// The Lexer struct is essentially a cursor into a string. All state required to
+// produce the next token is stored here; no global state is used, so multiple
+// Lexer instances can run concurrently.
+//
+// Key fields:
+//
+//   - input        – the entire source file held in memory as an immutable string
+//   - pos/readPos  – two indices that implement the sliding one-char look-ahead;
+//                    pos points at the byte currently being examined (l.ch),
+//                    readPos points at the byte that will be consumed next
+//   - ch           – the byte at pos, cached to avoid repeated index expressions
+//   - line/col     – source coordinates updated on every readChar() call; used
+//                    to stamp every token with its origin for error messages
+//   - atLineStart  – tracks whether we are at the first non-whitespace position
+//                    of a logical line; needed to distinguish labels and metacommands
+//                    from mid-line identifiers and '$' operators
+//   - prevTokenEOL – true at the very start of input and immediately after each
+//                    TOKEN_EOL; used together with atLineStart for metacommand detection
 
 // Lexer tokenizes Turbo BASIC source code into a stream of tokens.
 type Lexer struct {
@@ -18,6 +72,11 @@ type Lexer struct {
 }
 
 // New creates a new Lexer for the given input source code.
+//
+// The constructor primes the cursor by calling readChar() once. After New()
+// returns, l.ch holds the very first byte of the input and l.pos == 0, so the
+// first call to NextToken() can begin scanning immediately without any special
+// "start of input" check inside the main loop.
 func New(input string) *Lexer {
 	l := &Lexer{
 		input:        input,
@@ -57,7 +116,27 @@ func (l *Lexer) skipWhitespace() {
 	}
 }
 
-// NextToken returns the next token from the input.
+// NextToken is the main dispatch loop of the lexer.
+//
+// Each call returns exactly one token and advances the cursor past the
+// characters that make up that token. The caller (parser or test harness)
+// drives the lexer by repeatedly calling NextToken() until TOKEN_EOF.
+//
+// Dispatch strategy – ordered by decreasing specificity:
+//
+//  1. Whitespace is discarded first (spaces and tabs are not tokens in BASIC).
+//  2. The NUL byte (ch == 0) signals end-of-input → TOKEN_EOF.
+//  3. Newline characters (\r, \n) → TOKEN_EOL; BASIC is line-oriented so
+//     line endings are semantically significant (they terminate statements).
+//  4. Context-sensitive cases are tested before general ones:
+//     - '&' followed by H/O/B → radix prefix literal (must beat plain '&' operator)
+//     - '$' at line-start → metacommand (must beat '$' as a type-suffix operator)
+//  5. Digit or '.' followed by digit → numeric literal.
+//  6. Letter or '_' → identifier or keyword.
+//  7. Anything else → operator or punctuation (or TOKEN_ILLEGAL).
+//
+// After each token, atLineStart and prevTokenEOL are updated so that the next
+// call can make the same context-sensitive decisions correctly.
 func (l *Lexer) NextToken() Token {
 	l.skipWhitespace()
 
@@ -144,8 +223,22 @@ func (l *Lexer) readNewline() Token {
 	return tok
 }
 
-// readString reads a double-quoted string literal.
-// Embedded quotes are represented by two consecutive double-quotes.
+// readString scans a double-quoted string literal and applies Turbo BASIC's
+// escape convention.
+//
+// String literal parsing is straightforward: consume characters between the
+// opening and closing '"'. The only subtlety is the escape mechanism. Unlike C
+// (which uses backslash escapes), Turbo BASIC represents a literal double-quote
+// inside a string by doubling it: PRINT "say ""hello""" prints  say "hello".
+// This is the classic Pascal/SQL convention.
+//
+// Error handling: if the closing quote is never found before a newline or EOF,
+// the token type is set to TOKEN_ILLEGAL. The parser will then emit a
+// "unterminated string literal" diagnostic using the token's position fields.
+//
+// Implementation note: a strings.Builder accumulates the decoded content so
+// that doubled-quote pairs appear as a single '"' in the final Literal, matching
+// what the runtime will actually use.
 func (l *Lexer) readString() Token {
 	tok := Token{Type: TOKEN_STRING, Line: l.line, Column: l.col}
 	l.readChar() // skip opening quote
@@ -205,7 +298,32 @@ func (l *Lexer) readRemComment(remTok Token) Token {
 	return tok
 }
 
-// readNumber reads an integer or floating-point number literal.
+// readNumber recognises all numeric literal forms supported by Turbo BASIC and
+// maps each to a typed token.
+//
+// Numeric literal recognition in a single pass works by tracking boolean flags
+// as the cursor advances:
+//
+//   - hasDecimal   – set when a '.' is consumed mid-number; implies float
+//   - hasExponent  – set when E/e/D/d is consumed; implies float
+//
+// The character sequence that can start a number (dispatched from NextToken) is:
+// a decimal digit, OR a '.' immediately followed by a digit (e.g. ".5").
+//
+// Precision is determined in this priority order:
+//
+//  1. Exponent letter 'D'/'d' → TOKEN_DOUBLE (regardless of other flags)
+//  2. Type suffix character after the digits:
+//     '&' → TOKEN_LONG   (32-bit integer,  e.g. 100000&)
+//     '!' → TOKEN_SINGLE (32-bit float,    e.g. 3.14!)
+//     '#' → TOKEN_DOUBLE (64-bit float,    e.g. 3.14#)
+//     '%' → TOKEN_INTEGER(16-bit integer,  e.g. 42%)
+//  3. Decimal point or 'E'/'e' exponent → TOKEN_SINGLE (default float)
+//  4. Plain digits with no suffix or point → TOKEN_INTEGER
+//
+// The Literal field always contains the raw digit characters WITHOUT the type
+// suffix, because the suffix is purely a lexer-level hint; the parser and
+// evaluator work with the token type, not the suffix character.
 func (l *Lexer) readNumber() Token {
 	tok := Token{Line: l.line, Column: l.col}
 	start := l.pos
@@ -283,7 +401,21 @@ func (l *Lexer) readNumber() Token {
 	return tok
 }
 
-// readSpecialRadix reads &H (hex), &O (octal), or &B (binary) literals.
+// readSpecialRadix handles alternate-base integer literals.
+//
+// Turbo BASIC uses an '&' prefix followed by a radix letter to write integer
+// constants in bases other than 10:
+//
+//   &Hnn  – hexadecimal (base 16): digits 0-9, A-F
+//   &Onn  – octal       (base  8): digits 0-7
+//   &Bnn  – binary      (base  2): digits 0-1
+//
+// The dispatch in NextToken already confirmed that the character after '&' is
+// one of H/h/O/o/B/b, so this function can unconditionally consume '&' and
+// the radix letter, then read the appropriate digit alphabet in a tight loop.
+//
+// If no valid digits follow the radix letter the token is TOKEN_ILLEGAL, which
+// lets the parser produce a meaningful "empty numeric literal" error.
 func (l *Lexer) readSpecialRadix() Token {
 	tok := Token{Line: l.line, Column: l.col}
 	l.readChar() // skip &
@@ -318,7 +450,37 @@ func (l *Lexer) readSpecialRadix() Token {
 	return tok
 }
 
-// readIdentOrKeyword reads an identifier or keyword.
+// readIdentOrKeyword performs keyword disambiguation – the process of deciding
+// whether a sequence of word characters is a reserved keyword or a user-defined
+// identifier.
+//
+// # How keyword disambiguation works
+//
+// The lexer first greedily consumes all characters that can belong to a BASIC
+// word: letters, digits, underscores, and dots (BASIC allows dots in names for
+// record-field style identifiers like "player.score").
+//
+// It then checks, in order:
+//
+//  1. Type suffix immediately after the word (%, &, !, #, $).
+//     If present, the token is unconditionally TOKEN_IDENTIFIER – no keyword
+//     can carry a type suffix (PRINT% is not a keyword, it is a variable).
+//     The suffix is folded into the Literal so the parser/evaluator can recover
+//     the declared type (e.g. "count%" → integer variable).
+//
+//  2. Keyword table lookup via LookupIdent(upper).
+//     The raw text is uppercased before lookup because Turbo BASIC is
+//     case-insensitive: "print", "Print", and "PRINT" are all the same keyword.
+//     LookupIdent returns TOKEN_IDENTIFIER for any word not in the table.
+//
+//  3. Label detection.
+//     After a keyword lookup returns TOKEN_IDENTIFIER AND we are at the start
+//     of a logical line, the lexer speculatively skips whitespace and peeks at
+//     the next character. If it is ':', the word is a label definition and we
+//     emit TOKEN_LABEL (consuming the colon). Otherwise the saved cursor state
+//     is restored so scanning continues from where it left off. This is the one
+//     place in the lexer where a small, bounded lookahead beyond one character
+//     is needed.
 func (l *Lexer) readIdentOrKeyword() Token {
 	tok := Token{Line: l.line, Column: l.col}
 	start := l.pos

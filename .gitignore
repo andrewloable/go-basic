@@ -1,6 +1,6 @@
 # Binary
 basicc
-basicc.exe
+*.exe
 
 # Build artifacts
 coverage.out

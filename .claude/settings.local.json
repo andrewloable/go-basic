@@ -28,7 +28,12 @@
       "Bash(do bd:*)",
       "Bash(rm Makefile:*)",
       "Bash(do echo:*)",
-      "Bash(go run:*)"
+      "Bash(go run:*)",
+      "Bash(./basicc tokens:*)",
+      "Bash(./basicc transpile:*)",
+      "Bash(G:/projects/loabletech/go-basic/internal/ast/ast.go:*)",
+      "Bash(./basicc_new transpile:*)",
+      "Bash(ls:*)"
     ]
   }
 }

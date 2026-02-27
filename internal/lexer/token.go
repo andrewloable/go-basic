@@ -1,8 +1,113 @@
+// Package lexer implements the lexical analysis (scanning) phase of the BASIC
+// compiler pipeline.
+//
+// # Compiler pipeline overview
+//
+// A compiler typically has these front-end phases:
+//
+//	Source text  →  [Lexer]  →  token stream  →  [Parser]  →  AST  →  ...
+//
+// The lexer (also called a scanner or tokeniser) is the very first phase. Its
+// sole job is to convert a flat sequence of characters into a flat sequence of
+// tokens so that the parser can work at a higher level of abstraction without
+// caring about whitespace, case folding, or individual characters.
+//
+// # What is a token?
+//
+// A token is the smallest meaningful unit of a language — the "atom of
+// meaning". Just as words are the atoms of a sentence, tokens are the atoms of
+// a program. Every token has:
+//
+//   - A type  — an integer tag that classifies the token (e.g. TOKEN_PLUS,
+//     TOKEN_INTEGER, TOKEN_PRINT). Because it is just an int, the parser can
+//     compare token types in O(1) with a simple == or switch, rather than
+//     doing a string comparison on every character.
+//   - A literal — the exact source text that was consumed to produce the token
+//     (e.g. "3.14", "PRINT", "+"). This is kept so that error messages can
+//     quote the original source text and so that literal values (numbers,
+//     strings) can be parsed later.
+//   - A position — (line, column) so that diagnostics point at the right place.
+//
+// # How the lexer works (character stream → token stream)
+//
+// The lexer keeps a read cursor into the source string and repeatedly applies
+// the following algorithm:
+//
+//  1. Skip whitespace (spaces, tabs — but NOT newlines, which are significant
+//     in BASIC because statements end at end-of-line).
+//  2. Peek at the current character to decide which kind of token to produce.
+//  3. Consume as many characters as belong to that token (e.g. all digits of a
+//     number, all letters of an identifier or keyword).
+//  4. Wrap the consumed text in a Token struct and emit it.
+//  5. Repeat until the end of the source is reached, then emit TOKEN_EOF.
+//
+// This is a hand-written, single-pass, O(n) scanner — the simplest and most
+// common design for production compilers.
+//
+// # BASIC type suffixes (%  &  !  #  $)
+//
+// BASIC uses one-character type sigils that are written directly after an
+// identifier or a numeric literal to declare its type without a separate "AS"
+// keyword:
+//
+//	A%   → integer variable   (16-bit signed)
+//	A&   → long variable      (32-bit signed)
+//	A!   → single-precision float
+//	A#   → double-precision float
+//	A$   → string variable
+//
+// The same characters can also appear as standalone punctuation (e.g. # is
+// used for file-handle numbers, $ appears in built-in function names). The
+// lexer resolves the ambiguity contextually:
+//
+//   - When one of these characters follows an identifier or numeric literal
+//     without any intervening whitespace, it is scanned as a TOKEN_SUFFIX_*
+//     token (attached meaning).
+//   - When it appears on its own, it is scanned as the matching punctuation
+//     token (TOKEN_HASH, TOKEN_DOLLAR, etc.).
+//
+// Keeping suffix tokens distinct from punctuation tokens lets the parser apply
+// different grammar rules for each case without look-back.
+//
+// # TokenType as an integer enum
+//
+// TokenType is declared as "type TokenType int" and all constants are produced
+// with iota, which assigns consecutive integers starting at 0. This gives:
+//
+//   - Compact representation — one int per token, no heap allocation.
+//   - O(1) comparison — the parser uses token.Type == TOKEN_PRINT, not string
+//     equality, so hot-path checks are a single integer compare.
+//   - Switch-friendly dispatch — Go's switch on an integer is compiled to a
+//     jump table by the compiler for dense ranges, giving O(1) dispatch.
+//   - Debuggability — the tokenNames map translates the integer back to a
+//     human-readable string for error messages and pretty-printers.
+//
+// # Keyword recognition (LookupIdent)
+//
+// When the lexer finishes scanning a sequence of letters and digits, it does
+// not yet know whether it has read a keyword (PRINT, FOR, IF …) or a
+// user-defined name (myVar, counter …). LookupIdent resolves this:
+//
+//  1. The raw text is upper-cased (BASIC is case-insensitive).
+//  2. The upper-cased text is looked up in the "keywords" map
+//     (string → TokenType).
+//  3. If found, the keyword's token type is returned; otherwise TOKEN_IDENTIFIER
+//     is returned.
+//
+// Using a hash map makes keyword recognition O(1) on average regardless of
+// how many keywords the language has. The alternative — a long chain of string
+// comparisons or a trie — is slower or more complex to maintain.
+//
+// Metacommands ($DYNAMIC, $INCLUDE, …) are NOT in this map; they begin with
+// '$' so the lexer recognises them by their leading character and handles them
+// as a separate token family.
 package lexer
 
 import "fmt"
 
 // TokenType represents the type of a lexical token.
+// It is an integer rather than a string so that the parser can compare token
+// types with a single integer operation instead of a string comparison.
 type TokenType int
 
 const (
@@ -26,6 +131,14 @@ const (
 	// Line structure
 	TOKEN_LINENUMBER // 10, 20, 100 at start of line
 	TOKEN_LABEL      // MyLabel:
+
+	// ---- Literal tokens: punctuation and operators ----
+	// Each single- or double-character symbol that has syntactic meaning gets
+	// its own token type. Giving every symbol a distinct integer tag means the
+	// parser never needs to inspect the Literal field when making grammar
+	// decisions — it only checks the Type, which is a single integer compare.
+	// Multi-character operators (<=, >=, <>) are recognised by the lexer during
+	// a single peek-ahead step and emitted as a single token.
 
 	// Arithmetic operators
 	TOKEN_PLUS      // +
@@ -63,6 +176,17 @@ const (
 	TOKEN_SUFFIX_DOLLAR    // $ on identifier
 
 	// ---- Keywords ----
+	// Keywords are reserved words that have a fixed meaning in the language
+	// grammar. They are detected by LookupIdent (see below): after the lexer
+	// reads a run of identifier characters it upper-cases the text and probes
+	// the keywords map. If there is a hit, the keyword's token type is used
+	// instead of TOKEN_IDENTIFIER. This strategy keeps the scanner simple —
+	// it always reads identifiers the same way — while still giving the parser
+	// a distinct token type per keyword so grammar rules can be written as
+	// plain integer comparisons.
+	//
+	// BASIC is case-insensitive ("print" and "PRINT" are the same keyword), so
+	// the map stores only upper-case keys; the lexer normalises before lookup.
 
 	// I/O keywords
 	TOKEN_PRINT
@@ -73,6 +197,7 @@ const (
 	TOKEN_USING
 	TOKEN_LOCATE
 	TOKEN_CLS
+	TOKEN_CLEAR
 	TOKEN_COLOR
 	TOKEN_WIDTH
 	TOKEN_KEY
@@ -155,6 +280,8 @@ const (
 
 	// Array/variable keywords
 	TOKEN_ERASE
+	TOKEN_TYPE
+	TOKEN_CONST
 	TOKEN_SWAP
 	TOKEN_INCR
 	TOKEN_DECR
@@ -231,6 +358,20 @@ const (
 	TOKEN_RANDOMIZE
 	TOKEN_INSTAT
 
+	// ---- Metacompiler tokens ($-directives) ----
+	// Metacommands are compiler directives embedded inside comment lines
+	// (lines beginning with REM or '). They control the compiler itself rather
+	// than the runtime behaviour of the program. In QB/GW-BASIC they appear as
+	// "'$INCLUDE:'file.bi'" or "'$DYNAMIC".
+	//
+	// Because metacommands begin with '$', they cannot be ordinary identifiers
+	// (BASIC identifiers start with a letter). The lexer detects them by
+	// peeking at the first character of a comment body: if it is '$' the rest
+	// of the word is scanned and mapped to one of the TOKEN_META_* types below.
+	// This gives the parser a way to act on compiler directives at parse time
+	// (e.g. to include another file or switch memory-model modes) without
+	// treating them as user code.
+
 	// Metacommands
 	TOKEN_META_DYNAMIC  // $DYNAMIC
 	TOKEN_META_STATIC   // $STATIC
@@ -275,6 +416,7 @@ var keywords = map[string]TokenType{
 	"USING":     TOKEN_USING,
 	"LOCATE":    TOKEN_LOCATE,
 	"CLS":       TOKEN_CLS,
+	"CLEAR":     TOKEN_CLEAR,
 	"COLOR":     TOKEN_COLOR,
 	"WIDTH":     TOKEN_WIDTH,
 	"KEY":       TOKEN_KEY,
@@ -343,6 +485,8 @@ var keywords = map[string]TokenType{
 	"DEFDBL":    TOKEN_DEFDBL,
 	"DEFSTR":    TOKEN_DEFSTR,
 	"ERASE":     TOKEN_ERASE,
+	"TYPE":      TOKEN_TYPE,
+	"CONST":     TOKEN_CONST,
 	"SWAP":      TOKEN_SWAP,
 	"INCR":      TOKEN_INCR,
 	"DECR":      TOKEN_DECR,
@@ -466,6 +610,7 @@ var tokenNames = map[TokenType]string{
 	TOKEN_USING:            "USING",
 	TOKEN_LOCATE:           "LOCATE",
 	TOKEN_CLS:              "CLS",
+	TOKEN_CLEAR:            "CLEAR",
 	TOKEN_COLOR:            "COLOR",
 	TOKEN_WIDTH:            "WIDTH",
 	TOKEN_KEY:              "KEY",
@@ -531,6 +676,8 @@ var tokenNames = map[TokenType]string{
 	TOKEN_DEFDBL:           "DEFDBL",
 	TOKEN_DEFSTR:           "DEFSTR",
 	TOKEN_ERASE:            "ERASE",
+	TOKEN_TYPE:             "TYPE",
+	TOKEN_CONST:            "CONST",
 	TOKEN_SWAP:             "SWAP",
 	TOKEN_INCR:             "INCR",
 	TOKEN_DECR:             "DECR",

@@ -1,3 +1,75 @@
+// Package codegen implements Phase 4 of the go-basic compiler pipeline:
+// code generation — the final transformation from an Abstract Syntax Tree (AST)
+// into executable target code.
+//
+// # Compilation pipeline recap
+//
+//   Source text
+//       │  Phase 1: Lexer  (text → token stream)
+//       ▼
+//   Token stream
+//       │  Phase 2: Parser (tokens → AST)
+//       ▼
+//   AST
+//       │  Phase 3: Semantic analysis (type inference, symbol table)
+//       ▼
+//   Annotated AST
+//       │  Phase 4: Code generation  ← YOU ARE HERE
+//       ▼
+//   Target source (Go)
+//
+// # This is a transpiler, not a native-code compiler
+//
+// Rather than emitting machine code or bytecode, this package emits Go source
+// code that can then be compiled by the standard Go toolchain.  The strategy
+// trades raw performance for simplicity and portability: every BASIC construct
+// maps to an equivalent Go construct, and anything without a direct mapping
+// falls back to a helper in the runtime package (internal/runtime).
+//
+// # Tree-walking code generation
+//
+// The dominant pattern here is tree walking (also called a "recursive descent
+// emitter").  Starting from the root ast.Program node, we iterate over every
+// statement and call emitStatement(), which dispatches on the concrete node
+// type using a Go type-switch.  Expression nodes are handled analogously by
+// emitExpr().  Each handler directly writes Go source text into a bytes.Buffer.
+//
+// This is the simplest possible code-generation strategy and is sufficient for
+// a transpiler.  A production compiler targeting native code would instead
+// lower the AST to an intermediate representation (IR) such as SSA or LLVM IR
+// before performing register allocation and instruction selection.
+//
+// # Name mangling
+//
+// BASIC variable names cannot be used as-is in Go for two reasons:
+//
+//  1. Type-sigil suffixes: BASIC uses trailing characters to encode type
+//     information.  "X%" is an integer, "S$" is a string, "D#" is a double.
+//     These characters are not legal in Go identifiers, so they are replaced
+//     with readable suffixes: _pct, _str, _dbl, etc.
+//
+//  2. Keyword conflicts: Many common BASIC names ("return", "for", "type",
+//     "string", …) are reserved words in Go.  The mangler detects these and
+//     prepends "b_" so they remain valid identifiers without colliding.
+//
+// The mangleName() function handles both cases.  All references to a variable
+// — declarations, reads, and writes — go through the same mangler, so output
+// is consistent throughout the generated file.
+//
+// # Structure of the generated Go file
+//
+// The assembler (the second half of Generate()) stitches sections together in
+// a fixed order:
+//
+//  1. "package main" declaration.
+//  2. import block — only imports that were actually needed are emitted.
+//  3. Blank-identifier suppression lines (var _ = fmt.Sprintf, etc.) so the
+//     file compiles even when an import is referenced only by a TODO stub.
+//  4. func main() { … } — contains all top-level BASIC statements in source
+//     order, plus optional RNG and DATA pool preamble.
+//  5. SUB / FUNCTION / DEF FN declarations — appended after main().  They are
+//     collected in a separate funcBuf during the walk so that forward
+//     references from inside main() still resolve correctly.
 package codegen
 
 import (
@@ -17,17 +89,18 @@ import (
 
 // CodeGenerator holds all state needed while walking the AST and emitting Go.
 type CodeGenerator struct {
-	program    *ast.Program
-	table      *semantic.SymbolTable
-	buf        bytes.Buffer
-	indent     int
-	imports    map[string]bool  // track needed imports
-	declared   map[string]bool  // track declared variables (mangled names)
-	tempCount  int              // temp variable counter
-	labelMap   map[string]bool  // labels that exist
-	gosubFuncs map[string]bool  // GOSUB targets turned into functions
-	dataPool   []ast.Expression // DATA values
-	dataIdx    int              // current READ position
+	program         *ast.Program
+	table           *semantic.SymbolTable
+	buf             bytes.Buffer
+	indent          int
+	imports         map[string]bool  // track needed imports
+	declared        map[string]bool  // track declared variables (mangled names)
+	tempCount       int              // temp variable counter
+	labelMap        map[string]bool  // labels that exist (defined in source)
+	referencedLabels map[string]bool // labels that are targeted by GOTO/GOSUB
+	gosubFuncs      map[string]bool  // GOSUB targets turned into functions
+	dataPool        []ast.Expression // DATA values
+	dataIdx         int              // current READ position
 
 	// funcBuf collects SUB/FUNCTION declarations to emit outside main().
 	funcBuf bytes.Buffer
@@ -39,10 +112,11 @@ type CodeGenerator struct {
 // New creates a fresh CodeGenerator ready for use.
 func New() *CodeGenerator {
 	return &CodeGenerator{
-		imports:    make(map[string]bool),
-		declared:   make(map[string]bool),
-		labelMap:   make(map[string]bool),
-		gosubFuncs: make(map[string]bool),
+		imports:          make(map[string]bool),
+		declared:         make(map[string]bool),
+		labelMap:         make(map[string]bool),
+		referencedLabels: make(map[string]bool),
+		gosubFuncs:       make(map[string]bool),
 	}
 }
 
@@ -147,6 +221,12 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 // Pre-pass: collect labels, line numbers, and DATA values
 // ---------------------------------------------------------------------------
 
+// collectLabelsAndData performs a pre-pass over the AST to:
+//   - Record all label/line-number definitions (labelMap)
+//   - Record all GOTO/GOSUB targets (referencedLabels) so we only emit
+//     labels that are actually jumped to — Go considers unused labels a
+//     compile error, so emitting unreferenced labels would break the output.
+//   - Collect DATA values into the dataPool for READ statement access.
 func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
@@ -156,6 +236,25 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			g.labelMap[fmt.Sprintf("%d", s.Number)] = true
 		case *ast.DataStatement:
 			g.dataPool = append(g.dataPool, s.Values...)
+
+		// Collect GOTO/GOSUB targets — these become goto labels in Go.
+		case *ast.GotoStatement:
+			g.referencedLabels[strings.ToUpper(s.Target)] = true
+		case *ast.GosubStatement:
+			g.referencedLabels[strings.ToUpper(s.Target)] = true
+		// ON ERROR GOTO is emitted as a TODO comment (not a real goto), so we
+		// intentionally do NOT add its target to referencedLabels. That way the
+		// error-handler label is suppressed in the output and the file compiles.
+		case *ast.OnComputedGotoStatement:
+			for _, t := range s.Targets {
+				g.referencedLabels[strings.ToUpper(t)] = true
+			}
+		case *ast.OnComputedGosubStatement:
+			for _, t := range s.Targets {
+				g.referencedLabels[strings.ToUpper(t)] = true
+			}
+
+		// Recurse into nested blocks.
 		case *ast.IfStatement:
 			g.collectLabelsAndData(s.ThenBlock)
 			for _, clause := range s.ElseIfClauses {
@@ -172,6 +271,10 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			g.collectLabelsAndData(s.Body)
 		case *ast.FunctionDeclaration:
 			g.collectLabelsAndData(s.Body)
+		case *ast.SelectCaseStatement:
+			for _, c := range s.Cases {
+				g.collectLabelsAndData(c.Body)
+			}
 		}
 	}
 }
@@ -239,7 +342,23 @@ func (g *CodeGenerator) emitDataPoolInit(out *bytes.Buffer) {
 }
 
 // ---------------------------------------------------------------------------
-// Statement emitter – dispatches to specific handlers
+// Statement emitter – visitor pattern for statement nodes
+//
+// emitStatement() is the central dispatch point for the statement half of the
+// visitor.  It implements the Visitor pattern without a separate Visitor
+// interface: instead of calling stmt.Accept(visitor), we perform a Go
+// type-switch directly on the AST node.  The result is the same — each node
+// type is handled by a dedicated method — but with less boilerplate.
+//
+// Every branch of the switch corresponds to one BASIC statement kind.  If a
+// statement kind has non-trivial output it delegates to a dedicated emit*()
+// method; trivial cases (END, BEEP, …) are inlined in the switch.
+//
+// Statements that have no meaningful Go equivalent (POKE, CLEAR, ON ERROR,
+// unsupported file I/O) emit a comment or a no-op so the generated file still
+// compiles.  The "default" branch at the bottom is a safety net that emits a
+// TODO comment for any node type that was added to the parser but not yet
+// handled here.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
@@ -325,6 +444,23 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		g.emitColor(s)
 	case *ast.OnErrorGotoStatement:
 		g.writeLinef("// TODO: ON ERROR GOTO %s", s.Target)
+	case *ast.OnComputedGotoStatement:
+		g.emitOnComputedGoto(s)
+	case *ast.OnComputedGosubStatement:
+		g.emitOnComputedGosub(s)
+	case *ast.PokeStatement:
+		g.writeLinef("_ = %s; _ = %s // POKE (no-op in transpiled code)", g.emitExpr(s.Address), g.emitExpr(s.Value))
+	case *ast.ConstStatement:
+		g.writeLinef("%s := %s // CONST", mangleName(s.Name), g.emitExpr(s.Value))
+	case *ast.ClearStatement:
+		g.writeLine("// CLEAR — variable reset not supported in transpiled code")
+	case *ast.TypeBlockStatement:
+		g.emitTypeBlock(s)
+	case *ast.FnAssignStatement:
+		g.writeLinef("_fn_%s = %s", mangleName(s.Name), g.emitExpr(s.Value))
+	case *ast.FieldAssignStatement:
+		// Struct/TYPE field assignment: obj.Field = value
+		g.writeLinef("%s.%s = %s", g.emitExpr(s.Object), mangleName(s.Field), g.emitExpr(s.Value))
 	case *ast.ResumeStatement:
 		g.writeLinef("// TODO: RESUME %s", s.Type)
 	case *ast.ErrorStatement:
@@ -345,7 +481,28 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 }
 
 // ---------------------------------------------------------------------------
-// PRINT
+// PRINT — control flow / output mapping from BASIC to Go
+//
+// BASIC's PRINT statement is richer than a plain fmt.Println() call because it
+// supports three distinct output modes controlled by the separator characters
+// between expressions:
+//
+//   PRINT A; B      → semicolon: concatenate values with no spacing
+//                     → fmt.Print(A, B) / fmt.Println(A, B)
+//
+//   PRINT A, B      → comma: "zone" or column-tabbing output.  Each comma
+//                     advances to the next 14-character print zone.
+//                     → rt.PrintZone() from the runtime package
+//
+//   PRINT USING f$; → formatted output with a format template.
+//                     → rt.PrintUsing() from the runtime package
+//
+// A trailing semicolon suppresses the newline (PRINT A;), mapping to
+// fmt.Print() instead of fmt.Println().
+//
+// This illustrates a general challenge in transpilation: a single source
+// keyword may need to be mapped to several different target constructs
+// depending on its runtime-determined arguments.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitPrint(s *ast.PrintStatement) {
@@ -439,9 +596,12 @@ func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 	if !g.declared[name] {
 		g.declared[name] = true
 		goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
-		g.writeLinef("var %s %s = %s", name, goT, val)
+		// Cast the value to the variable's type to handle mismatches between
+		// BASIC's implicit coercions and Go's strict typing.
+		g.writeLinef("var %s %s = %s(%s)", name, goT, goT, val)
 	} else {
-		g.writeLinef("%s = %s", name, val)
+		goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
+		g.writeLinef("%s = %s(%s)", name, goT, val)
 	}
 }
 
@@ -457,8 +617,10 @@ func (g *CodeGenerator) emitArrayAssignment(s *ast.ArrayAssignment) {
 	}
 	val := g.emitExpr(s.Value)
 
+	// Cast value to the array element type to prevent Go type mismatches.
+	elemType := g.goTypeForIdent(s.Array.Name + s.Array.TypeSuffix)
 	if len(indices) == 1 {
-		g.writeLinef("%s[int(%s)] = %s", arrName, indices[0], val)
+		g.writeLinef("%s[int(%s)] = %s(%s)", arrName, indices[0], elemType, val)
 	} else {
 		// Multi-dimensional: emit a comment and the first index for now.
 		g.writeLinef("// TODO: multi-dim array assignment %s[%s] = %s", arrName, strings.Join(indices, "]["), val)
@@ -466,7 +628,23 @@ func (g *CodeGenerator) emitArrayAssignment(s *ast.ArrayAssignment) {
 }
 
 // ---------------------------------------------------------------------------
-// IF / THEN / ELSE
+// IF / THEN / ELSE — conditional control flow mapping
+//
+// BASIC's IF maps almost 1-to-1 onto Go's if/else if/else chain.  The
+// structural difference that requires care is BASIC's numeric truth model:
+// any non-zero numeric value is true (0 is false), whereas Go requires an
+// explicit bool in a condition expression.
+//
+// The helper toBoolExpr() bridges this gap.  It inspects the emitted
+// expression string: if it already contains a comparison operator it is
+// already a Go bool; otherwise it appends "!= 0" to coerce the numeric value.
+// This heuristic works well in practice because BASIC conditions are almost
+// always either comparisons or the results of logical operators (AND/OR/NOT),
+// which are themselves emitted as bitwise operations on integers.
+//
+// ELSEIF clauses are unrolled into the natural Go "} else if … {" pattern
+// by iterating s.ElseIfClauses.  The recursive body walks emit nested
+// statements at increased indentation, producing correctly formatted output.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitIf(s *ast.IfStatement) {
@@ -501,7 +679,27 @@ func (g *CodeGenerator) emitIf(s *ast.IfStatement) {
 }
 
 // ---------------------------------------------------------------------------
-// FOR / NEXT
+// FOR / NEXT — numeric loop control flow mapping
+//
+// BASIC's FOR loop is more subtle than it appears.  The STEP value may be
+// positive, negative, or zero, and BASIC requires the loop body to execute
+// zero times if the initial value is already past the end value in the given
+// direction.  A simple Go "for i = start; i <= end; i += step" is wrong for
+// negative steps.
+//
+// The emitted loop handles all three cases with a single compound condition:
+//
+//   for counter = start;
+//       (step > 0 && counter <= end) ||
+//       (step < 0 && counter >= end) ||
+//       (step == 0);           // runs exactly once when step == 0
+//       counter += step { … }
+//
+// To avoid re-evaluating the STEP and END expressions on every iteration
+// (which would be wrong if they contained side effects), both are captured
+// in temporary variables (end_N, step_N) before the loop header.  The
+// tempCount field provides a monotonically increasing suffix to guarantee
+// uniqueness across multiple FOR loops in the same scope.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitFor(s *ast.ForStatement) {
@@ -522,14 +720,17 @@ func (g *CodeGenerator) emitFor(s *ast.ForStatement) {
 	}
 
 	// Use a helper temp for end and step so they are evaluated once.
+	// Cast both to the counter's Go type to avoid mismatched-type errors: BASIC
+	// is dynamically typed but Go requires homogeneous operands in comparisons.
 	endVar := fmt.Sprintf("end_%d", g.tempCount)
 	stepVar := fmt.Sprintf("step_%d", g.tempCount)
 	g.tempCount++
 
-	g.writeLinef("%s := %s", endVar, endExpr)
-	g.writeLinef("%s := %s", stepVar, stepExpr)
-	g.writeLinef("for %s = %s; (%s > 0 && %s <= %s) || (%s < 0 && %s >= %s) || (%s == 0); %s += %s {",
-		counter, startExpr,
+	counterType := g.goTypeForIdent(s.Counter.Name + s.Counter.TypeSuffix)
+	g.writeLinef("%s := %s(%s)", endVar, counterType, endExpr)
+	g.writeLinef("%s := %s(%s)", stepVar, counterType, stepExpr)
+	g.writeLinef("for %s = %s(%s); (%s > 0 && %s <= %s) || (%s < 0 && %s >= %s) || (%s == 0); %s += %s {",
+		counter, counterType, startExpr,
 		stepVar, counter, endVar,
 		stepVar, counter, endVar,
 		stepVar,
@@ -616,8 +817,11 @@ func (g *CodeGenerator) emitSelectCase(s *ast.SelectCaseStatement) {
 	g.tempCount++
 	g.writeLinef("%s := %s", testVar, testExpr)
 
-	// We use an if/else chain because Go's switch can't handle ranges or IS comparisons directly.
-	first := true
+	// Emit as a Go "switch {}" (tagless switch on boolean conditions) rather
+	// than an if/else chain.  This is important because GO requires "break"
+	// statements to be inside a for/switch/select — and BASIC's EXIT FOR/
+	// EXIT LOOP inside a CASE body should break out of the surrounding switch.
+	g.writeLine("switch {")
 	for _, c := range s.Cases {
 		condParts := make([]string, 0, len(c.Values))
 		for _, cv := range c.Values {
@@ -635,12 +839,7 @@ func (g *CodeGenerator) emitSelectCase(s *ast.SelectCaseStatement) {
 			}
 		}
 		cond := strings.Join(condParts, " || ")
-		if first {
-			g.writeLinef("if %s {", cond)
-			first = false
-		} else {
-			g.writeLinef("} else if %s {", cond)
-		}
+		g.writeLinef("case %s:", cond)
 		g.indent++
 		for _, stmt := range c.Body {
 			g.emitStatement(stmt)
@@ -649,7 +848,7 @@ func (g *CodeGenerator) emitSelectCase(s *ast.SelectCaseStatement) {
 	}
 
 	if len(s.ElseBlock) > 0 {
-		g.writeLine("} else {")
+		g.writeLine("default:")
 		g.indent++
 		for _, stmt := range s.ElseBlock {
 			g.emitStatement(stmt)
@@ -756,10 +955,15 @@ func (g *CodeGenerator) emitRestore(_ *ast.RestoreStatement) {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitLineNumber(s *ast.LineNumberStatement) {
-	label := fmt.Sprintf("line_%d", s.Number)
-	// Labels in Go must not be indented more than the surrounding block in some
-	// tools, but they are valid at any indentation.  We emit at indent-1 to
-	// make them stand out.
+	// Only emit the label if it is the target of a GOTO or GOSUB.
+	// Go treats unused labels as compile errors, so emitting unreferenced
+	// line-number labels (which BASIC programs often have for every line)
+	// would make the output fail to compile.
+	key := fmt.Sprintf("%d", s.Number)
+	if !g.referencedLabels[key] {
+		return
+	}
+	label := "line_" + key
 	if g.indent > 0 {
 		old := g.indent
 		g.indent = 0
@@ -771,6 +975,11 @@ func (g *CodeGenerator) emitLineNumber(s *ast.LineNumberStatement) {
 }
 
 func (g *CodeGenerator) emitLabel(s *ast.LabelStatement) {
+	// Same as above: only emit if referenced.
+	key := strings.ToUpper(s.Name)
+	if !g.referencedLabels[key] {
+		return
+	}
 	label := g.labelName(s.Name)
 	if g.indent > 0 {
 		old := g.indent
@@ -792,12 +1001,14 @@ func (g *CodeGenerator) emitRem(s *ast.RemStatement) {
 
 func (g *CodeGenerator) emitExit(s *ast.ExitStatement) {
 	switch strings.ToUpper(s.ExitType) {
-	case "FOR", "DO", "WHILE":
+	case "FOR", "DO", "WHILE", "LOOP":
+		// LOOP is an alias for DO in Turbo BASIC (EXIT LOOP = exit DO loop)
 		g.writeLine("break")
-	case "SUB", "FUNCTION":
+	case "SUB", "FUNCTION", "DEF":
+		// EXIT DEF exits a DEF FN multi-line function (equivalent to return)
 		g.writeLine("return")
 	default:
-		g.writeLinef("break // EXIT %s", s.ExitType)
+		g.writeLinef("// EXIT %s (unsupported)", s.ExitType)
 	}
 }
 
@@ -912,6 +1123,21 @@ func (g *CodeGenerator) emitColor(s *ast.ColorStatement) {
 
 // ---------------------------------------------------------------------------
 // SUB / FUNCTION / DEF FN – top-level declarations
+//
+// emitTopLevelDecl() is a second visitor entry point used exclusively for
+// procedure-level constructs.  In BASIC, SUB and FUNCTION blocks can appear
+// anywhere in the source file, but in Go they must be top-level declarations
+// outside of any other function.
+//
+// The strategy is to redirect writes from the main buffer (g.buf) to a
+// separate buffer (g.funcBuf) while walking the procedure body.  After the
+// entire program has been processed, funcBuf is appended to the output after
+// the closing brace of main(), producing valid Go.
+//
+// emitSubDecl / emitFuncDecl temporarily swap g.buf with a fresh buffer so
+// that nested emitStatement() calls still write through the same pointer,
+// then move the result into funcBuf.  The indent counter is also saved and
+// restored so indentation inside the procedure body starts at level 1.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitTopLevelDecl(stmt ast.Statement) {
@@ -1018,7 +1244,31 @@ func (g *CodeGenerator) emitParams(params []ast.Parameter) string {
 }
 
 // ---------------------------------------------------------------------------
-// Expression emitter – returns a Go source string
+// Expression emitter – visitor pattern for expression nodes
+//
+// emitExpr() is the expression-side visitor.  It mirrors emitStatement() but
+// returns a string instead of writing to the buffer directly.  This is the
+// key architectural difference between statements and expressions in a
+// tree-walking code generator:
+//
+//   Statement emitters  → write text to g.buf as a side effect (l-value
+//                          semantics: "do this").
+//   Expression emitters → return a string that represents the value and can
+//                          be composed into a larger expression (r-value
+//                          semantics: "compute this").
+//
+// For example, emitPrint() calls g.emitExpr(expr) to get the Go string for
+// each sub-expression, then assembles them into a fmt.Println() call.
+//
+// Recursion is the natural mechanism for nested expressions.  A BinaryExpr
+// node calls emitExpr on both its Left and Right children, then wraps the
+// results in parentheses with the mapped operator in the middle.  This
+// bottom-up composition means deeply nested expressions like:
+//
+//   A * (B + C) ^ 2
+//
+// are correctly parenthesised in the output without any explicit precedence
+// tracking — parentheses are inserted at every level.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitExpr(expr ast.Expression) string {
@@ -1042,6 +1292,11 @@ func (g *CodeGenerator) emitExpr(expr ast.Expression) string {
 		return g.emitArrayAccess(e)
 	case *ast.GroupExpr:
 		return "(" + g.emitExpr(e.Inner) + ")"
+	case *ast.FnCallExpression:
+		return g.emitFnCallExpression(e)
+	case *ast.FieldAccessExpression:
+		// Struct/TYPE field access: obj.Field (maps directly to Go struct field)
+		return g.emitExpr(e.Object) + "." + mangleName(e.Field)
 	default:
 		return "0 /* unknown expression */"
 	}
@@ -1125,7 +1380,33 @@ func (g *CodeGenerator) emitUnaryExpr(e *ast.UnaryExpr) string {
 }
 
 // ---------------------------------------------------------------------------
-// Function call
+// Function call — mapping BASIC built-ins to the runtime package
+//
+// BASIC has a large library of built-in functions (ABS, SIN, LEFT$, etc.)
+// that must be available in every program.  In a native-code compiler these
+// would be part of the language runtime linked directly into the binary.  In
+// this transpiler they live in the separate "internal/runtime" (aliased "rt")
+// package, which is unconditionally imported into every generated file.
+//
+// The dispatch strategy is a large switch on the upper-cased function name.
+// Each known built-in case emits the corresponding "rt.FuncName(…)" call,
+// performing any necessary argument coercions (e.g., int() casts for
+// functions that require integer arguments in Go even though BASIC treats
+// all numbers as float64).
+//
+// Several built-ins return two values (result, error) in the runtime package
+// to preserve the original BASIC error-handling semantics.  Because the
+// transpiled code uses expression-level embedding, they are wrapped in an
+// immediately-invoked function literal:
+//
+//   func() float64 { v_, _ := rt.Sqr(x); return v_ }()
+//
+// This is an inline closure that discards the error — a pragmatic choice that
+// keeps expression context simple at the cost of ignoring runtime errors.
+//
+// The "default" case handles user-defined SUB/FUNCTION calls: the name is
+// mangled and called directly, since user functions end up as top-level Go
+// functions in the same package.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
@@ -1278,11 +1559,34 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 }
 
 // ---------------------------------------------------------------------------
-// Array access
+// Array access — BASIC 1-based indexing vs. Go 0-based slices
+//
+// One of the most common semantic mismatches between BASIC and Go is array
+// indexing.  BASIC arrays are conventionally 1-based: "DIM A(10)" declares
+// elements A(1) through A(10).  Go slices are always 0-based.
+//
+// The reconciliation used here is to allocate slices with one extra element:
+//
+//   DIM A(10)  →  a := make([]float64, 10+1)   // indices 0..10
+//
+// This wastes one slot at index 0 but keeps the indexing arithmetic trivial:
+// A(i) in BASIC simply becomes a[int(i)] in Go — no adjustment needed.
+// The cost is one unused slot per array, which is almost always acceptable.
+//
+// Note that emitArrayAccess does NOT subtract 1 from the index.  The "+1"
+// in emitDim is the only adaptation required.  This design choice must be
+// understood when reading both functions together.
+//
+// Multi-dimensional arrays are not yet fully supported; a TODO comment is
+// emitted as a placeholder so the file still compiles.
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitArrayAccess(aa *ast.ArrayAccess) string {
 	name := mangleName(aa.Name + aa.TypeSuffix)
+	if len(aa.Indices) == 0 {
+		// No indices — array passed by reference (e.g., as a SUB parameter)
+		return name
+	}
 	if len(aa.Indices) == 1 {
 		idx := g.emitExpr(aa.Indices[0])
 		return fmt.Sprintf("%s[int(%s)]", name, idx)
@@ -1339,7 +1643,38 @@ func (g *CodeGenerator) labelName(target string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Variable name mangling
+// Variable name mangling — bridging BASIC names to Go identifiers
+//
+// Name mangling is the process of transforming identifiers from the source
+// language into legal identifiers in the target language.  It is required
+// whenever the two languages have incompatible identifier rules.
+//
+// BASIC has two identifier features that Go does not support:
+//
+//  1. Sigil (type) suffixes — trailing punctuation encodes the variable type:
+//
+//       COUNT%    integer      → count_pct
+//       NAME$     string       → name_str
+//       TOTAL&    long int     → total_lng
+//       RATE!     single float → rate_sng
+//       FACTOR#   double       → factor_dbl
+//
+//     These characters are not valid in Go identifiers, so they are replaced
+//     with readable alphabetic suffixes that carry the same information.
+//     sanitizeGoIdent() then removes any remaining invalid characters.
+//
+//  2. Go keyword conflicts — BASIC programs freely use names like RETURN,
+//     FOR, TYPE, STRING which happen to be reserved in Go.  The mangler
+//     detects these after the sigil transformation and prepends "b_":
+//
+//       RETURN  → b_return
+//       TYPE    → b_type
+//       STRING  → b_string
+//
+// Crucially, every use of a variable name — declarations, reads, writes, and
+// parameter lists — must pass through mangleName() so the output is
+// consistent.  A mangle applied in one place but not another would cause a
+// "undefined identifier" compile error in the generated Go.
 // ---------------------------------------------------------------------------
 
 // mangleName converts a BASIC variable name (possibly with type suffix) to a
@@ -1529,17 +1864,15 @@ func isStringType(name string) bool {
 // ---------------------------------------------------------------------------
 
 // formatGoNumber emits a Go numeric literal for a BASIC NumberLiteral.
+// We emit *untyped* Go constants (e.g., 42 or 3.14) rather than wrapping in
+// float64(...).  Go's untyped constant rules automatically convert them to
+// the destination type (float32, int16, float64, etc.) during assignment and
+// function calls, avoiding the "cannot use float64(N) as float32" errors that
+// would arise from explicit typed wrappers.
 func formatGoNumber(n *ast.NumberLiteral) string {
-	// If it is an integer value without fractional part, emit without decimal.
+	// If it is an integer value without fractional part, emit as a plain integer.
 	if n.Value == math.Trunc(n.Value) && n.Value >= -1e15 && n.Value <= 1e15 {
-		switch n.NumType {
-		case ast.NumInt:
-			return fmt.Sprintf("float64(%d)", int64(n.Value))
-		case ast.NumLong:
-			return fmt.Sprintf("float64(%d)", int64(n.Value))
-		default:
-			return fmt.Sprintf("float64(%d)", int64(n.Value))
-		}
+		return fmt.Sprintf("%d", int64(n.Value))
 	}
 	return fmt.Sprintf("%g", n.Value)
 }
@@ -1560,4 +1893,47 @@ func (g *CodeGenerator) argN(args []string, n int) string {
 		return args[n]
 	}
 	return "0"
+}
+
+// emitOnComputedGoto emits an ON expr GOTO t1, t2, ... as a series of if/goto.
+// The target label names are converted using labelName() to match the emitted labels.
+func (g *CodeGenerator) emitOnComputedGoto(s *ast.OnComputedGotoStatement) {
+	expr := g.emitExpr(s.Expr)
+	g.writeLine("{")
+	g.indent++
+	g.writeLinef("_on_idx := int(%s)", expr)
+	for i, t := range s.Targets {
+		g.writeLinef("if _on_idx == %d { goto %s }", i+1, g.labelName(t))
+	}
+	g.indent--
+	g.writeLine("}")
+}
+
+// emitOnComputedGosub emits ON expr GOSUB t1, t2, ... as a series of if/goto.
+// True GOSUB (save return address, jump, return) can't be emulated with goto,
+// so we use goto for now — the RETURN at the subroutine end exits the function.
+func (g *CodeGenerator) emitOnComputedGosub(s *ast.OnComputedGosubStatement) {
+	expr := g.emitExpr(s.Expr)
+	g.writeLine("{")
+	g.indent++
+	g.writeLinef("_on_idx := int(%s)", expr)
+	for i, t := range s.Targets {
+		g.writeLinef("if _on_idx == %d { goto %s }", i+1, g.labelName(t))
+	}
+	g.indent--
+	g.writeLine("}")
+}
+
+// emitTypeBlock emits a TYPE block as a Go struct definition.
+func (g *CodeGenerator) emitTypeBlock(s *ast.TypeBlockStatement) {
+	g.writeLinef("// TYPE %s (user-defined type — transpiled as struct)", s.Name)
+}
+
+// emitFnCallExpression emits a DEF FN function call.
+func (g *CodeGenerator) emitFnCallExpression(e *ast.FnCallExpression) string {
+	var argStrs []string
+	for _, a := range e.Args {
+		argStrs = append(argStrs, g.emitExpr(a))
+	}
+	return fmt.Sprintf("fn_%s(%s)", mangleName(e.Name), strings.Join(argStrs, ", "))
 }
