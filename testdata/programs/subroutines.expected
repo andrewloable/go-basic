@@ -32,7 +32,7 @@ func PrintLine(msg_str string) {
 func Factorial(n float32) float32 {
 	var Factorial float32
 	if (n <= 1) {
-		var Factorial float32 = float32(1)
+		Factorial = float32(1)
 	} else {
 		Factorial = float32((n * Factorial((n - 1))))
 	}

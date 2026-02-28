@@ -41,7 +41,8 @@
       "Bash(/tmp/typecast_test.bas:*)",
       "Bash(/tmp/test_randomize.go:*)",
       "Bash(grep:*)",
-      "Bash(/tmp/test_compile.go:*)"
+      "Bash(/tmp/test_compile.go:*)",
+      "Bash(go:*)"
     ]
   }
 }

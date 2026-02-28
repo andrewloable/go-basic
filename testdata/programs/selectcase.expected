@@ -15,19 +15,20 @@ var _ = rt.Abs
 func main() {
 	// Test SELECT CASE
 	var i float32
-	end_0 := float64(10)
-	step_0 := 1
-	for i = float64(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
+	end_0 := float32(10)
+	step_0 := float32(1)
+	for i = float32(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
 		sel_1 := i
-		if (sel_1 == float64(1)) {
+		switch {
+		case (sel_1 == 1):
 			fmt.Println("one")
-		} else if (sel_1 == float64(2)) || (sel_1 == float64(3)) {
+		case (sel_1 == 2) || (sel_1 == 3):
 			fmt.Println("two or three")
-		} else if (sel_1 >= float64(4) && sel_1 <= float64(6)) {
+		case (sel_1 >= 4 && sel_1 <= 6):
 			fmt.Println("four to six")
-		} else if (sel_1 > float64(8)) {
+		case (sel_1 > 8):
 			fmt.Println("greater than eight")
-		} else {
+		default:
 			fmt.Println("seven or eight")
 		}
 	}

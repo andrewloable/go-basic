@@ -330,8 +330,14 @@ func TestGoto(t *testing.T) {
 }
 
 func TestLabelStatement(t *testing.T) {
+	// A label must be referenced by a GOTO to be emitted (unreferenced labels are pruned).
 	stmts := []ast.Statement{
+		&ast.GotoStatement{BasePos: ast.Position{Line: 1}, Target: "myLabel"},
 		&ast.LabelStatement{Name: "myLabel"},
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{&ast.StringLiteral{Value: "at label"}},
+			Separators:  []string{""},
+		},
 	}
 	out := generate(t, stmts)
 	if !strings.Contains(out, "label_myLabel:") {
@@ -412,8 +418,8 @@ func TestSelectCase(t *testing.T) {
 	if !strings.Contains(out, "sel_") {
 		t.Errorf("expected select temp variable, got:\n%s", out)
 	}
-	if !strings.Contains(out, "} else {") {
-		t.Errorf("expected else block for CASE ELSE, got:\n%s", out)
+	if !strings.Contains(out, "default:") {
+		t.Errorf("expected default: block for CASE ELSE, got:\n%s", out)
 	}
 }
 

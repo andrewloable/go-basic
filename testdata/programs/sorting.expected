@@ -14,43 +14,43 @@ var _ = rt.Abs
 
 func main() {
 	// Bubble sort
-	a := make([]float32, int(float64(10))+1)
+	a := make([]float32, int(10)+1)
 	//  Initialize with random-ish values
-	a[int(float64(1))] = float64(64)
-	a[int(float64(2))] = float64(34)
-	a[int(float64(3))] = float64(25)
-	a[int(float64(4))] = float64(12)
-	a[int(float64(5))] = float64(22)
-	a[int(float64(6))] = float64(11)
-	a[int(float64(7))] = float64(90)
-	a[int(float64(8))] = float64(1)
-	a[int(float64(9))] = float64(45)
-	a[int(float64(10))] = float64(7)
+	a[int(1)] = float32(64)
+	a[int(2)] = float32(34)
+	a[int(3)] = float32(25)
+	a[int(4)] = float32(12)
+	a[int(5)] = float32(22)
+	a[int(6)] = float32(11)
+	a[int(7)] = float32(90)
+	a[int(8)] = float32(1)
+	a[int(9)] = float32(45)
+	a[int(10)] = float32(7)
 	fmt.Println("Before sort:")
 	var i float32
-	end_0 := float64(10)
-	step_0 := 1
-	for i = float64(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
+	end_0 := float32(10)
+	step_0 := float32(1)
+	for i = float32(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
 		fmt.Print(a[int(i)])
 	}
 	fmt.Println()
 	//  Bubble sort
-	end_1 := float64(9)
-	step_1 := 1
-	for i = float64(1); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
+	end_1 := float32(9)
+	step_1 := float32(1)
+	for i = float32(1); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
 		var j float32
-		end_2 := (float64(10) - i)
-		step_2 := 1
-		for j = float64(1); (step_2 > 0 && j <= end_2) || (step_2 < 0 && j >= end_2) || (step_2 == 0); j += step_2 {
-			if (a[int(j)] > a[int((j + float64(1)))]) {
-				a[int(j)], a[int((j + float64(1)))] = a[int((j + float64(1)))], a[int(j)]
+		end_2 := float32((10 - i))
+		step_2 := float32(1)
+		for j = float32(1); (step_2 > 0 && j <= end_2) || (step_2 < 0 && j >= end_2) || (step_2 == 0); j += step_2 {
+			if (a[int(j)] > a[int((j + 1))]) {
+				a[int(j)], a[int((j + 1))] = a[int((j + 1))], a[int(j)]
 			}
 		}
 	}
 	fmt.Println("After sort:")
-	end_3 := float64(10)
-	step_3 := 1
-	for i = float64(1); (step_3 > 0 && i <= end_3) || (step_3 < 0 && i >= end_3) || (step_3 == 0); i += step_3 {
+	end_3 := float32(10)
+	step_3 := float32(1)
+	for i = float32(1); (step_3 > 0 && i <= end_3) || (step_3 < 0 && i >= end_3) || (step_3 == 0); i += step_3 {
 		fmt.Print(a[int(i)])
 	}
 	fmt.Println()

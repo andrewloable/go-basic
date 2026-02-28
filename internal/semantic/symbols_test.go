@@ -764,6 +764,805 @@ func TestResolverIfStatement(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// Additional resolveStatement dispatch tests (uncovered branches)
+// ===========================================================================
+
+func TestResolverWhileStatement(t *testing.T) {
+	// WHILE x > 0 / x = x - 1 / WEND
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 5, OriginalText: "5"},
+			},
+			&ast.WhileStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Condition: &ast.BinaryExpr{
+					Left:     &ast.Identifier{Name: "x", TypeSuffix: "%"},
+					Operator: ">",
+					Right:    &ast.NumberLiteral{Value: 0, OriginalText: "0"},
+				},
+				Body: []ast.Statement{
+					&ast.LetStatement{
+						BasePos: ast.Position{Line: 3, Column: 1},
+						Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+						Value: &ast.BinaryExpr{
+							Left:     &ast.Identifier{Name: "x", TypeSuffix: "%"},
+							Operator: "-",
+							Right:    &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+						},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if table.Lookup("x%") == nil {
+		t.Error("x% should be in symbol table")
+	}
+}
+
+func TestResolverDoLoopStatement(t *testing.T) {
+	// DO WHILE x < 10 / x = x + 1 / LOOP
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 0, OriginalText: "0"},
+			},
+			&ast.DoLoopStatement{
+				BasePos:   ast.Position{Line: 2, Column: 1},
+				TestAtTop: true,
+				Condition: &ast.BinaryExpr{
+					Left:     &ast.Identifier{Name: "x", TypeSuffix: "%"},
+					Operator: "<",
+					Right:    &ast.NumberLiteral{Value: 10, OriginalText: "10"},
+				},
+				Body: []ast.Statement{
+					&ast.IncrStatement{
+						BasePos:  ast.Position{Line: 3, Column: 1},
+						Variable: &ast.Identifier{Name: "x", TypeSuffix: "%"},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverDoLoopNoCondition(t *testing.T) {
+	// Infinite DO / LOOP
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DoLoopStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: nil,
+				Body: []ast.Statement{
+					&ast.LetStatement{
+						BasePos: ast.Position{Line: 2, Column: 1},
+						Name:    &ast.Identifier{Name: "n", TypeSuffix: "%"},
+						Value:   &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverSelectCaseStatement(t *testing.T) {
+	// SELECT CASE x% / CASE 1 / y% = 1 / CASE 2, 3 / y% = 2 / CASE ELSE / y% = 0 / END SELECT
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 2, OriginalText: "2"},
+			},
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 2, Column: 1},
+				TestExpr: &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{{Value: &ast.NumberLiteral{Value: 1, OriginalText: "1"}}},
+						Body: []ast.Statement{
+							&ast.LetStatement{
+								BasePos: ast.Position{},
+								Name:    &ast.Identifier{Name: "y", TypeSuffix: "%"},
+								Value:   &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+							},
+						},
+					},
+				},
+				ElseBlock: []ast.Statement{
+					&ast.LetStatement{
+						BasePos: ast.Position{},
+						Name:    &ast.Identifier{Name: "y", TypeSuffix: "%"},
+						Value:   &ast.NumberLiteral{Value: 0, OriginalText: "0"},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if table.Lookup("y%") == nil {
+		t.Error("y% should be in symbol table from CASE body")
+	}
+}
+
+func TestResolverDefFnDeclaration(t *testing.T) {
+	// DEF FNDouble(x!) = x! * 2
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DefFnDeclaration{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    "FNDouble",
+				Params: []ast.Parameter{
+					{Name: "x", Type: "!"},
+				},
+				SingleLineExpr: &ast.BinaryExpr{
+					Left:     &ast.Identifier{Name: "x", TypeSuffix: "!"},
+					Operator: "*",
+					Right:    &ast.NumberLiteral{Value: 2, OriginalText: "2"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	sym := table.Lookup("FNDouble")
+	if sym == nil {
+		t.Fatal("FNDouble should be in symbol table")
+	}
+	if sym.Type != SymDefFn {
+		t.Errorf("expected SymDefFn, got %v", sym.Type)
+	}
+}
+
+func TestResolverOnErrorGotoStatement(t *testing.T) {
+	// ON ERROR GOTO handler / handler:
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.OnErrorGotoStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Target:  "handler",
+			},
+			&ast.LabelStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Name:    "handler",
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverOnEventGosubStatement(t *testing.T) {
+	// ON KEY(1) GOSUB handler / handler:
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.OnEventGosubStatement{
+				BasePos:    ast.Position{Line: 1, Column: 1},
+				EventType:  "KEY",
+				EventParam: &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Target:     "handler",
+			},
+			&ast.LabelStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Name:    "handler",
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverArrayAssignment(t *testing.T) {
+	// DIM a%(10) / a%(5) = 42
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DimStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Declarations: []ast.DimDecl{
+					{
+						Name:       "a",
+						TypeSuffix: "%",
+						Dimensions: []ast.DimRange{
+							{Upper: &ast.NumberLiteral{Value: 10, OriginalText: "10"}},
+						},
+					},
+				},
+			},
+			&ast.ArrayAssignment{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Array: &ast.ArrayAccess{
+					Name:       "a",
+					TypeSuffix: "%",
+					Indices:    []ast.Expression{&ast.NumberLiteral{Value: 5, OriginalText: "5"}},
+				},
+				Value: &ast.NumberLiteral{Value: 42, OriginalText: "42"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	sym := table.Lookup("a%")
+	if sym == nil {
+		t.Fatal("a% should be in symbol table")
+	}
+	if !sym.Used {
+		t.Error("a% should be marked as Used after array assignment")
+	}
+}
+
+func TestResolverReadStatement(t *testing.T) {
+	// DATA 1, 2 / READ x%, y%
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DataStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Values: []ast.Expression{
+					&ast.NumberLiteral{Value: 1, OriginalText: "1"},
+					&ast.NumberLiteral{Value: 2, OriginalText: "2"},
+				},
+			},
+			&ast.ReadStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Variables: []ast.Expression{
+					&ast.Identifier{Name: "x", TypeSuffix: "%"},
+					&ast.Identifier{Name: "y", TypeSuffix: "%"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if table.Lookup("x%") == nil {
+		t.Error("x% should be in symbol table after READ")
+	}
+}
+
+func TestResolverSwapStatement(t *testing.T) {
+	// a% = 10 / b% = 20 / SWAP a%, b%
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "a", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 10, OriginalText: "10"},
+			},
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Name:    &ast.Identifier{Name: "b", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 20, OriginalText: "20"},
+			},
+			&ast.SwapStatement{
+				BasePos: ast.Position{Line: 3, Column: 1},
+				Var1:    &ast.Identifier{Name: "a", TypeSuffix: "%"},
+				Var2:    &ast.Identifier{Name: "b", TypeSuffix: "%"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverIncrStatement(t *testing.T) {
+	// x% = 5 / INCR x%, 2
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 5, OriginalText: "5"},
+			},
+			&ast.IncrStatement{
+				BasePos:  ast.Position{Line: 2, Column: 1},
+				Variable: &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Amount:   &ast.NumberLiteral{Value: 2, OriginalText: "2"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverDecrStatement(t *testing.T) {
+	// x% = 10 / DECR x%
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value:   &ast.NumberLiteral{Value: 10, OriginalText: "10"},
+			},
+			&ast.DecrStatement{
+				BasePos:  ast.Position{Line: 2, Column: 1},
+				Variable: &ast.Identifier{Name: "x", TypeSuffix: "%"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverRedimStatement(t *testing.T) {
+	// DIM arr%(10) / REDIM arr%(20)
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DimStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Declarations: []ast.DimDecl{
+					{
+						Name:       "arr",
+						TypeSuffix: "%",
+						Dimensions: []ast.DimRange{
+							{Upper: &ast.NumberLiteral{Value: 10, OriginalText: "10"}},
+						},
+					},
+				},
+			},
+			&ast.RedimStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Declarations: []ast.DimDecl{
+					{
+						Name:       "arr",
+						TypeSuffix: "%",
+						Dimensions: []ast.DimRange{
+							{Upper: &ast.NumberLiteral{Value: 20, OriginalText: "20"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	sym := table.Lookup("arr%")
+	if sym == nil {
+		t.Fatal("arr% should be in symbol table")
+	}
+	if sym.ArrayDims != 1 {
+		t.Errorf("expected 1 dim after REDIM, got %d", sym.ArrayDims)
+	}
+}
+
+func TestResolverRedimNewArray(t *testing.T) {
+	// REDIM of undeclared array creates it
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.RedimStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Declarations: []ast.DimDecl{
+					{
+						Name:       "newArr",
+						TypeSuffix: "#",
+						Dimensions: []ast.DimRange{
+							{Upper: &ast.NumberLiteral{Value: 50, OriginalText: "50"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	sym := table.Lookup("newArr#")
+	if sym == nil {
+		t.Fatal("newArr# should be created by REDIM")
+	}
+	if sym.DataType != TypeDouble {
+		t.Errorf("expected TypeDouble for # suffix, got %v", sym.DataType)
+	}
+}
+
+// ===========================================================================
+// File I/O resolver tests
+// ===========================================================================
+
+func TestResolverOpenStatement(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.OpenStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Filename: &ast.StringLiteral{Value: "test.dat"},
+				Mode:     "INPUT",
+				FileNum:  &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverOpenWithRecLen(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.OpenStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Filename: &ast.StringLiteral{Value: "data.dat"},
+				Mode:     "RANDOM",
+				FileNum:  &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				RecLen:   &ast.NumberLiteral{Value: 128, OriginalText: "128"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverCloseStatement(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.CloseStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				FileNums: []ast.Expression{
+					&ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverFileInputStatement(t *testing.T) {
+	// INPUT #1, x$, y%
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.FileInputStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				FileNum: &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Variables: []ast.Expression{
+					&ast.Identifier{Name: "x", TypeSuffix: "$"},
+					&ast.Identifier{Name: "y", TypeSuffix: "%"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if table.Lookup("x$") == nil {
+		t.Error("x$ should be in symbol table after INPUT#")
+	}
+}
+
+func TestResolverFilePrintStatement(t *testing.T) {
+	// PRINT #1, x$
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "$"},
+				Value:   &ast.StringLiteral{Value: "hello"},
+			},
+			&ast.FilePrintStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				FileNum: &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Expressions: []ast.Expression{
+					&ast.Identifier{Name: "x", TypeSuffix: "$"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverFilePrintWithFormat(t *testing.T) {
+	// PRINT #1, USING "##"; x%
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.FilePrintStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				FileNum: &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Expressions: []ast.Expression{
+					&ast.NumberLiteral{Value: 42, OriginalText: "42"},
+				},
+				Format: &ast.StringLiteral{Value: "##"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverFileWriteStatement(t *testing.T) {
+	// WRITE #1, x, y$
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.FileWriteStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				FileNum: &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Expressions: []ast.Expression{
+					&ast.Identifier{Name: "x"},
+					&ast.Identifier{Name: "y", TypeSuffix: "$"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverGetStatement(t *testing.T) {
+	// GET #1, recNum
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.GetStatement{
+				BasePos:     ast.Position{Line: 1, Column: 1},
+				FileNum:     &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				RecordOrPos: &ast.Identifier{Name: "recNum"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverPutStatement(t *testing.T) {
+	// PUT #1, recNum
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.PutStatement{
+				BasePos:     ast.Position{Line: 1, Column: 1},
+				FileNum:     &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				RecordOrPos: &ast.Identifier{Name: "recNum"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestResolverSeekStatement(t *testing.T) {
+	// SEEK #1, pos
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SeekStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				FileNum:  &ast.NumberLiteral{Value: 1, OriginalText: "1"},
+				Position: &ast.NumberLiteral{Value: 100, OriginalText: "100"},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	_, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+// ===========================================================================
+// Expression helper tests (resolveArrayAccess, resolveElementType, etc.)
+// ===========================================================================
+
+func TestResolverArrayAccessExpression(t *testing.T) {
+	// DIM scores%(10) / x% = scores%(3)
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DimStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Declarations: []ast.DimDecl{
+					{
+						Name:       "scores",
+						TypeSuffix: "%",
+						Dimensions: []ast.DimRange{
+							{Upper: &ast.NumberLiteral{Value: 10, OriginalText: "10"}},
+						},
+					},
+				},
+			},
+			&ast.LetStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Name:    &ast.Identifier{Name: "x", TypeSuffix: "%"},
+				Value: &ast.ArrayAccess{
+					Name:       "scores",
+					TypeSuffix: "%",
+					Indices:    []ast.Expression{&ast.NumberLiteral{Value: 3, OriginalText: "3"}},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	sym := table.Lookup("scores%")
+	if sym == nil {
+		t.Fatal("scores% should be in symbol table")
+	}
+	if !sym.Used {
+		t.Error("scores% should be marked as Used after array access")
+	}
+}
+
+func TestResolveElementTypeWithASKeyword(t *testing.T) {
+	// DIM x AS INTEGER (elementType = "INTEGER")
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DimStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Declarations: []ast.DimDecl{
+					{Name: "x", TypeSuffix: "", ElementType: "INTEGER"},
+					{Name: "y", TypeSuffix: "", ElementType: "LONG"},
+					{Name: "z", TypeSuffix: "", ElementType: "SINGLE"},
+					{Name: "w", TypeSuffix: "", ElementType: "DOUBLE"},
+					{Name: "s", TypeSuffix: "", ElementType: "STRING"},
+				},
+			},
+		},
+	}
+	resolver := NewResolver(prog)
+	table, errs := resolver.Resolve()
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	tests := []struct{ name string; want DataType }{
+		{"x", TypeInteger},
+		{"y", TypeLong},
+		{"z", TypeSingle},
+		{"w", TypeDouble},
+		{"s", TypeString},
+	}
+	for _, tc := range tests {
+		sym := table.Lookup(tc.name)
+		if sym == nil {
+			t.Fatalf("%s should be in symbol table", tc.name)
+		}
+		if sym.DataType != tc.want {
+			t.Errorf("%s: expected %v, got %v", tc.name, tc.want, sym.DataType)
+		}
+	}
+}
+
+func TestParamDataTypeAllVariants(t *testing.T) {
+	st := NewSymbolTable()
+	tests := []struct {
+		typeStr string
+		name    string
+		want    DataType
+	}{
+		{"INTEGER", "x", TypeInteger},
+		{"%", "x", TypeInteger},
+		{"LONG", "x", TypeLong},
+		{"&", "x", TypeLong},
+		{"SINGLE", "x", TypeSingle},
+		{"!", "x", TypeSingle},
+		{"DOUBLE", "x", TypeDouble},
+		{"#", "x", TypeDouble},
+		{"STRING", "x", TypeString},
+		{"$", "x", TypeString},
+		{"", "count%", TypeInteger},  // fallback via suffix
+		{"", "ratio", TypeSingle},    // fallback default
+	}
+	for _, tc := range tests {
+		got := paramDataType(tc.typeStr, tc.name, st)
+		if got != tc.want {
+			t.Errorf("paramDataType(%q, %q) = %v, want %v", tc.typeStr, tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestResolveReturnTypeAllVariants(t *testing.T) {
+	st := NewSymbolTable()
+	tests := []struct {
+		retType string
+		name    string
+		want    DataType
+	}{
+		{"INTEGER", "fn", TypeInteger},
+		{"%", "fn", TypeInteger},
+		{"LONG", "fn", TypeLong},
+		{"&", "fn", TypeLong},
+		{"SINGLE", "fn", TypeSingle},
+		{"!", "fn", TypeSingle},
+		{"DOUBLE", "fn", TypeDouble},
+		{"#", "fn", TypeDouble},
+		{"STRING", "fn", TypeString},
+		{"$", "fn", TypeString},
+		{"", "fnResult%", TypeInteger},  // fallback via suffix
+		{"", "fnResult", TypeSingle},   // fallback default
+	}
+	for _, tc := range tests {
+		got := resolveReturnType(tc.retType, tc.name, st)
+		if got != tc.want {
+			t.Errorf("resolveReturnType(%q, %q) = %v, want %v", tc.retType, tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestResolveReturnTypeFromNameSuffix(t *testing.T) {
+	st := NewSymbolTable()
+	// Name ends in # → double
+	got := resolveReturnType("", "Result#", st)
+	if got != TypeDouble {
+		t.Errorf("expected TypeDouble from # suffix in name, got %v", got)
+	}
+	// Name ends in $ → string
+	got = resolveReturnType("", "Name$", st)
+	if got != TypeString {
+		t.Errorf("expected TypeString from $ suffix in name, got %v", got)
+	}
+}
+
 func TestSymbolTypeString(t *testing.T) {
 	tests := []struct {
 		st   SymbolType

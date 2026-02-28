@@ -13,8 +13,8 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
-	var x float32 = float64(10)
-	var y float32 = float64(20)
+	var x float32 = float32(10)
+	var y float32 = float32(20)
 	var name_str string = "Turbo BASIC"
 	fmt.Println("x =", x)
 	fmt.Println("y =", y)

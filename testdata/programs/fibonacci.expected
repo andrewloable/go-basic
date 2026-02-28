@@ -14,19 +14,19 @@ var _ = rt.Abs
 
 func main() {
 	// Fibonacci sequence
-	fib := make([]float32, int(float64(20))+1)
-	fib[int(float64(0))] = float64(0)
-	fib[int(float64(1))] = float64(1)
+	fib := make([]float32, int(20)+1)
+	fib[int(0)] = float32(0)
+	fib[int(1)] = float32(1)
 	var i float32
-	end_0 := float64(20)
-	step_0 := 1
-	for i = float64(2); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
-		fib[int(i)] = (fib[int((i - float64(1)))] + fib[int((i - float64(2)))])
+	end_0 := float32(20)
+	step_0 := float32(1)
+	for i = float32(2); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
+		fib[int(i)] = float32((fib[int((i - 1))] + fib[int((i - 2))]))
 	}
 	fmt.Println("Fibonacci sequence:")
-	end_1 := float64(20)
-	step_1 := 1
-	for i = float64(0); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
+	end_1 := float32(20)
+	step_1 := float32(1)
+	for i = float32(0); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
 		fmt.Print(fib[int(i)])
 	}
 	fmt.Println()

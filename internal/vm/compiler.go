@@ -1351,6 +1351,11 @@ func (c *Compiler) compileFunctionCall(fc *ast.FunctionCall) {
 
 	// Check if this is a built-in function.
 	if id, ok := builtinMap[name]; ok {
+		// INSTR can take 2 or 3 args: INSTR(s$, find$) or INSTR(start%, s$, find$).
+		// The VM always pops 3, so push a default start=1 when only 2 args given.
+		if id == BuiltinInstr && len(fc.Args) == 2 {
+			c.emit(OpPush, c.addConstant(IntVal(1)), line)
+		}
 		for _, arg := range fc.Args {
 			c.compileExpression(arg)
 		}

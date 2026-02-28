@@ -17,43 +17,43 @@ func main() {
 	//  FOR/NEXT
 	fmt.Println("FOR loop:")
 	var i float32
-	end_0 := float64(5)
-	step_0 := 1
-	for i = float64(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
+	end_0 := float32(5)
+	step_0 := float32(1)
+	for i = float32(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
 		fmt.Print(i)
 	}
 	fmt.Println()
 	//  FOR with STEP
 	fmt.Println("FOR with STEP:")
-	end_1 := float64(1)
-	step_1 := (-float64(2))
-	for i = float64(10); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
+	end_1 := float32(1)
+	step_1 := float32((-2))
+	for i = float32(10); (step_1 > 0 && i <= end_1) || (step_1 < 0 && i >= end_1) || (step_1 == 0); i += step_1 {
 		fmt.Print(i)
 	}
 	fmt.Println()
 	//  WHILE/WEND
 	fmt.Println("WHILE loop:")
-	var x float32 = float64(1)
-	for (x <= float64(5)) {
+	var x float32 = float32(1)
+	for (x <= 5) {
 		fmt.Print(x)
-		x = (x + float64(1))
+		x = float32((x + 1))
 	}
 	fmt.Println()
 	//  DO WHILE/LOOP
 	fmt.Println("DO WHILE loop:")
-	x = float64(1)
-	for (x <= float64(5)) {
+	x = float32(1)
+	for (x <= 5) {
 		fmt.Print(x)
-		x = (x + float64(1))
+		x = float32((x + 1))
 	}
 	fmt.Println()
 	//  DO/LOOP UNTIL
 	fmt.Println("DO UNTIL loop:")
-	x = float64(1)
+	x = float32(1)
 	for {
 		fmt.Print(x)
-		x = (x + float64(1))
-		if (x > float64(5)) { break }
+		x = float32((x + 1))
+		if (x > 5) { break }
 	}
 	fmt.Println()
 	os.Exit(0)
