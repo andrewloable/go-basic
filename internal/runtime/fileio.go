@@ -1,3 +1,47 @@
+// fileio.go — File I/O built-ins for the BASIC runtime.
+//
+// # Compiler Design Note: BASIC's File I/O Model
+//
+// Turbo BASIC supports three distinct file access styles, each opened with a
+// different mode keyword:
+//
+//  1. Sequential (INPUT / OUTPUT / APPEND)
+//     Files are read or written as a stream of comma-delimited or newline-
+//     delimited text values. Think CSV. PRINT # writes, INPUT # reads.
+//
+//  2. Random access (RANDOM)
+//     Files are divided into fixed-length records. FIELD maps variable names
+//     to byte ranges within a record buffer. GET # reads a record by number;
+//     PUT # writes one. This was BASIC's way of implementing flat-file databases.
+//
+//  3. Binary (BINARY)
+//     Raw byte access at arbitrary positions. GET # / PUT # work on byte arrays.
+//
+// # File Handle Table (FileManager)
+//
+// BASIC identifies files by small integers called file numbers or handles:
+//
+//	OPEN "data.txt" FOR INPUT AS #1
+//	LINE INPUT #1, a$
+//	CLOSE #1
+//
+// The FileManager struct maintains a map[int]*BasicFile that plays the same
+// role as the OS file descriptor table — it maps BASIC's numeric handles to
+// the underlying Go *os.File objects plus associated buffering state.
+//
+// This is the same abstraction used in the C runtime (FILE*) and Python's
+// io module: the language runtime owns the handle table so that the user
+// program cannot forge or corrupt file state.
+//
+// # Generated Code Integration
+//
+// The code generator declares a *FileManager global in each generated program:
+//
+//	var _fm = rt.NewFileManager()
+//
+// OPEN, CLOSE, GET, PUT, PRINT #, INPUT # are all translated to method calls
+// on _fm, e.g. _fm.FileOpen(1, "data.txt", rt.FileModeInput, 0).
+
 package runtime
 
 import (
@@ -41,7 +85,12 @@ type FieldDef struct {
 	Length int
 }
 
-// FileManager manages all open BASIC files.
+// FileManager manages all open BASIC files indexed by their BASIC file numbers.
+//
+// The map key is the BASIC file number (e.g. 1 for OPEN … AS #1). Using a map
+// rather than a slice means file numbers can be arbitrary integers and there is
+// no fixed upper limit. CLOSE #0 (or CLOSE with no argument) closes all files
+// via FileCloseAll, mirroring DOS BASIC behaviour on program exit.
 type FileManager struct {
 	files map[int]*BasicFile
 }
@@ -53,7 +102,14 @@ func NewFileManager() *FileManager {
 	}
 }
 
-// FileOpen opens a file with the given file number, name, mode, and record length.
+// FileOpen opens a file, registers it under the given BASIC file number, and
+// sets up buffered readers/writers appropriate for the access mode.
+//
+// BASIC: OPEN name FOR mode AS #num [LEN = recLen]
+//
+// The recLen parameter is only meaningful for FileModeRandom; for other modes
+// it is ignored and defaults to 128 if zero (DOS BASIC's default record size).
+// Opening a number that is already in use is an error (File already open).
 func (fm *FileManager) FileOpen(num int, name string, mode FileMode, recLen int) error {
 	if _, exists := fm.files[num]; exists {
 		return fmt.Errorf("file #%d already open", num)
@@ -106,7 +162,9 @@ func (fm *FileManager) FileOpen(num int, name string, mode FileMode, recLen int)
 	return nil
 }
 
-// FileClose closes a specific file number. If num is 0, closes all files.
+// FileClose closes the file with the given BASIC file number.
+// BASIC: CLOSE #num — flushes any buffered output before closing.
+// If num is 0, all open files are closed (CLOSE with no argument).
 func (fm *FileManager) FileClose(num int) error {
 	if num == 0 {
 		return fm.FileCloseAll()
@@ -151,8 +209,13 @@ func (fm *FileManager) getFile(num int) (*BasicFile, error) {
 
 // --- Sequential I/O ---
 
-// FileInput reads the next comma/newline-delimited value from a sequential file.
-// Returns the raw string value; caller is responsible for type conversion.
+// FileInput reads the next comma- or newline-delimited token from a sequential file.
+// BASIC: INPUT #num, var — reads one value per call; the caller (generated code)
+// converts the raw string to the target variable's type (float, int, string).
+//
+// The parser here handles quoted strings (with doubled-quote escaping) so that
+// strings written with WRITE # (which quote-wraps strings) can be read back
+// faithfully with INPUT #.
 func (fm *FileManager) FileInput(num int) (string, error) {
 	bf, err := fm.getFile(num)
 	if err != nil {
@@ -239,7 +302,9 @@ func (fm *FileManager) FileLineInput(num int) (string, error) {
 	return line, nil
 }
 
-// FilePrint writes formatted values to a sequential output file (PRINT #).
+// FilePrint writes space-separated string values followed by CRLF to a sequential file.
+// BASIC: PRINT #num, expr [; expr …] — mirrors console PRINT but to a file.
+// Values are already formatted strings (the code generator pre-formats numbers).
 func (fm *FileManager) FilePrint(num int, values ...string) error {
 	bf, err := fm.getFile(num)
 	if err != nil {
@@ -257,7 +322,11 @@ func (fm *FileManager) FilePrint(num int, values ...string) error {
 	return w.Flush()
 }
 
-// FileWrite writes values in WRITE # format (quoted strings, comma-separated).
+// FileWrite writes values in WRITE # format: strings are double-quoted and values
+// are comma-separated, terminated with CRLF.
+// BASIC: WRITE #num, expr [, expr …] — produces machine-readable output suitable
+// for reading back with INPUT #. Strings are quoted; doubled quotes inside strings
+// are escaped as "". Numbers are written without leading spaces.
 func (fm *FileManager) FileWrite(num int, values ...interface{}) error {
 	bf, err := fm.getFile(num)
 	if err != nil {

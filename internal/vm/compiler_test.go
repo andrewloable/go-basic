@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -497,5 +498,270 @@ PRINT b`
 	}
 	if !strings.Contains(output, "-1") {
 		t.Fatalf("expected '-1' in output, got %q", output)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CONST, POKE, CLEAR
+// ---------------------------------------------------------------------------
+
+func TestConstStatement(t *testing.T) {
+	out := compileAndRun(t, `
+CONST PI = 3.14159
+PRINT PI
+`)
+	if !strings.Contains(out, "3.14159") {
+		t.Errorf("CONST PI: expected '3.14159' in output, got %q", out)
+	}
+}
+
+func TestConstExprArith(t *testing.T) {
+	out := compileAndRun(t, `
+CONST TWO = 1 + 1
+PRINT TWO
+`)
+	if !strings.Contains(out, "2") {
+		t.Errorf("CONST 1+1: expected '2' in output, got %q", out)
+	}
+}
+
+func TestPokeNoOp(t *testing.T) {
+	// POKE should not crash and should not produce output.
+	out := compileAndRun(t, `
+POKE 1000, 255
+PRINT "ok"
+`)
+	if !strings.Contains(out, "ok") {
+		t.Errorf("POKE: expected 'ok', got %q", out)
+	}
+}
+
+func TestClearResetsVars(t *testing.T) {
+	out := compileAndRun(t, `
+x = 42
+CLEAR
+PRINT x
+`)
+	// After CLEAR, x should be 0.
+	if !strings.Contains(out, "0") {
+		t.Errorf("CLEAR: expected x=0 after CLEAR, got %q", out)
+	}
+	if strings.Contains(out, "42") {
+		t.Errorf("CLEAR: x should not be 42 after CLEAR, got %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ON GOTO / ON GOSUB
+// ---------------------------------------------------------------------------
+
+func TestOnComputedGoto(t *testing.T) {
+	tests := []struct {
+		n       int
+		want    string
+		notWant string
+	}{
+		{1, "one", ""},
+		{2, "two", ""},
+		{3, "three", ""},
+		{0, "fallthrough", ""},  // out of range — falls through to GOTO done
+		{4, "fallthrough", ""},  // out of range — falls through to GOTO done
+	}
+	for _, tt := range tests {
+		src := fmt.Sprintf(`
+n = %d
+ON n GOTO lbl1, lbl2, lbl3
+PRINT "fallthrough"
+GOTO done
+lbl1:
+PRINT "one"
+GOTO done
+lbl2:
+PRINT "two"
+GOTO done
+lbl3:
+PRINT "three"
+done:
+`, tt.n)
+		out := compileAndRun(t, src)
+		if !strings.Contains(out, tt.want) {
+			t.Errorf("ON %d GOTO: expected %q, got %q", tt.n, tt.want, out)
+		}
+	}
+}
+
+func TestOnComputedGosub(t *testing.T) {
+	src := `
+n = 2
+ON n GOSUB sub1, sub2, sub3
+PRINT "back"
+END
+sub1:
+PRINT "s1"
+RETURN
+sub2:
+PRINT "s2"
+RETURN
+sub3:
+PRINT "s3"
+RETURN
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "s2") {
+		t.Errorf("ON 2 GOSUB: expected 's2', got %q", out)
+	}
+	if !strings.Contains(out, "back") {
+		t.Errorf("ON GOSUB: expected 'back' after return, got %q", out)
+	}
+	if strings.Contains(out, "s1") || strings.Contains(out, "s3") {
+		t.Errorf("ON GOSUB: unexpected sub called, got %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: DEF FN single-line inline call
+// ---------------------------------------------------------------------------
+
+func TestDefFnSingleLine(t *testing.T) {
+	src := `
+DEF FNSquare(x) = x * x
+PRINT FNSquare(5)
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "25") {
+		t.Errorf("FNSquare(5): expected '25', got %q", out)
+	}
+}
+
+func TestDefFnRestoresParam(t *testing.T) {
+	// Verify that the caller's variable is restored after the DEF FN call.
+	src := `
+x = 10
+DEF FNDouble(x) = x * 2
+PRINT FNDouble(7)
+PRINT x
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "14") {
+		t.Errorf("FNDouble(7): expected '14', got %q", out)
+	}
+	if !strings.Contains(out, "10") {
+		t.Errorf("x after call: expected '10', got %q", out)
+	}
+}
+
+func TestDefFnMultiParam(t *testing.T) {
+	src := `
+DEF FNAdd(a, b) = a + b
+PRINT FNAdd(3, 4)
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "7") {
+		t.Errorf("FNAdd(3,4): expected '7', got %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: TYPE field access (flat variable mangling)
+// ---------------------------------------------------------------------------
+
+func TestTypeFieldAssignAndAccess(t *testing.T) {
+	// TYPE blocks don't emit bytecode; field access uses flat variable mangling.
+	src := `
+TYPE Point
+  x AS INTEGER
+  y AS INTEGER
+END TYPE
+p_x = 10
+p_y = 20
+PRINT p_x
+PRINT p_y
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "10") {
+		t.Errorf("p.x: expected '10', got %q", out)
+	}
+	if !strings.Contains(out, "20") {
+		t.Errorf("p.y: expected '20', got %q", out)
+	}
+}
+
+func TestTypeDefMapPopulated(t *testing.T) {
+	// TYPE block should populate typeDefMap; no bytecode errors.
+	src := `
+TYPE Point
+  x AS INTEGER
+  y AS INTEGER
+END TYPE
+DIM p AS Point
+p.x = 5
+PRINT p.x
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "5") {
+		t.Errorf("p.x: expected '5', got %q", out)
+	}
+
+	_, compiler := compileSource(t, src)
+	fields, ok := compiler.typeDefMap["POINT"]
+	if !ok {
+		t.Fatal("typeDefMap missing POINT")
+	}
+	if len(fields) != 2 {
+		t.Errorf("POINT fields: expected 2, got %d", len(fields))
+	}
+}
+
+func TestDefTypeStatement(t *testing.T) {
+	// DEFINT A-Z records suffix in defTypeMap; program runs without error.
+	src := `
+DEFINT A-Z
+a = 10
+PRINT a
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "10") {
+		t.Errorf("DEFINT a=10: expected '10', got %q", out)
+	}
+
+	_, compiler := compileSource(t, src)
+	if compiler.defTypeMap['A'-'A'] != "%" {
+		t.Errorf("defTypeMap[A]: expected '%%', got %q", compiler.defTypeMap['A'-'A'])
+	}
+}
+
+func TestScopeStatementNoError(t *testing.T) {
+	// SHARED inside a program scope should compile without error.
+	// In the flat global VM, scope modifiers are accepted but produce no bytecode.
+	src := `
+SHARED x
+x = 42
+PRINT x
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "42") {
+		t.Errorf("SHARED x: expected '42', got %q", out)
+	}
+}
+
+func TestFieldAssignStatement(t *testing.T) {
+	// FieldAssignStatement: p.x = 5 should store to flat variable p_x.
+	src := `
+TYPE Point
+  x AS INTEGER
+  y AS INTEGER
+END TYPE
+DIM p AS Point
+p.x = 42
+p.y = 7
+PRINT p.x
+PRINT p.y
+`
+	out := compileAndRun(t, src)
+	if !strings.Contains(out, "42") {
+		t.Errorf("p.x after assign: expected '42', got %q", out)
+	}
+	if !strings.Contains(out, "7") {
+		t.Errorf("p.y after assign: expected '7', got %q", out)
 	}
 }

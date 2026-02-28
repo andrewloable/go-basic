@@ -18,7 +18,7 @@ func main() {
 	// Test error handling
 	errState.SetHandler("label_handler") // ON ERROR GOTO handler
 	fmt.Println("Before error")
-	// TODO: ERROR 5
+	if _berr := errState.TriggerError(int(5), 0); _berr != nil { goto label_handler }
 	//  Illegal function call
 	fmt.Println("This should not print")
 	os.Exit(0)

@@ -106,31 +106,79 @@ package lexer
 import "fmt"
 
 // TokenType represents the type of a lexical token.
-// It is an integer rather than a string so that the parser can compare token
-// types with a single integer operation instead of a string comparison.
+//
+// It is an integer (not a string) for three reasons:
+//
+//   1. Speed — comparing two integers is a single CPU instruction. Comparing
+//      two strings requires scanning up to N bytes and may cause a cache miss.
+//      The parser compares token types millions of times per second, so this
+//      matters in practice.
+//
+//   2. Switch dispatch — Go (and most compiled languages) can compile a switch
+//      on a dense integer range into a jump table: O(1) dispatch regardless of
+//      how many cases there are. A switch on strings compiles to a linear scan
+//      or a hash lookup — both slower.
+//
+//   3. Separation of concerns — token type and token text are independent.
+//      Storing both as an integer tag (type) and a string slice (literal) lets
+//      the parser make decisions based on type alone, without reading the text.
+//      The text is only consulted when the actual value matters (e.g., to get
+//      the digits of a number literal or the content of a string literal).
 type TokenType int
 
 const (
-	// Special tokens
+	// Special / structural tokens
+	//
+	// TOKEN_ILLEGAL is produced when the lexer encounters a character or
+	// sequence it cannot classify. Rather than crashing, the lexer emits
+	// TOKEN_ILLEGAL with the offending text; the parser then reports a
+	// meaningful error and attempts recovery.
+	//
+	// TOKEN_EOF signals the end of input. Giving EOF its own token type (rather
+	// than using nil or a special boolean flag) lets the parser check for end-of-
+	// input with the same pattern it uses for any other token: curToken.Type == TOKEN_EOF.
+	//
+	// TOKEN_EOL is a visible token in BASIC. Unlike C or Go (where newlines are
+	// whitespace), BASIC statements end at the end of the line, so the lexer
+	// must emit a token for every newline so the parser knows where statements stop.
+	//
+	// TOKEN_COMMENT carries the comment text (without the leading ' or "REM ")
+	// so that comments can be preserved in the AST and re-emitted as Go comments.
 	TOKEN_ILLEGAL TokenType = iota
 	TOKEN_EOF
 	TOKEN_EOL
 	TOKEN_COMMENT
 
-	// Identifiers and literals
+	// Identifier and literal tokens
+	//
+	// These represent programmer-supplied values rather than fixed language
+	// keywords. The lexer distinguishes numeric sub-types so that the parser
+	// can immediately know the BASIC precision without re-parsing the literal.
+	//
+	// TOKEN_IDENTIFIER is the catch-all for any word not found in the keyword
+	// table. It includes user variable names, array names, and sub/function
+	// names — anything that is not a reserved BASIC word.
 	TOKEN_IDENTIFIER
-	TOKEN_INTEGER    // 42
-	TOKEN_LONG       // 42&
-	TOKEN_SINGLE     // 3.14 or 3.14!
-	TOKEN_DOUBLE     // 3.14159265#
-	TOKEN_STRING     // "hello"
-	TOKEN_HEX        // &H1A
-	TOKEN_OCTAL      // &O77
-	TOKEN_BINARY_LIT // &B1010
+	TOKEN_INTEGER    // whole number with no suffix or % suffix (e.g. 42, 42%)
+	TOKEN_LONG       // whole number with & suffix                (e.g. 100000&)
+	TOKEN_SINGLE     // floating-point with ! suffix or E exponent (e.g. 3.14!)
+	TOKEN_DOUBLE     // floating-point with # suffix or D exponent (e.g. 3.14#)
+	TOKEN_STRING     // double-quoted text literal               (e.g. "hello")
+	TOKEN_HEX        // &H prefix hexadecimal literal            (e.g. &H1A)
+	TOKEN_OCTAL      // &O prefix octal literal                  (e.g. &O77)
+	TOKEN_BINARY_LIT // &B prefix binary literal                 (e.g. &B1010)
 
-	// Line structure
+	// Line structure tokens
+	//
+	// Old-style BASIC numbered lines (10, 20, 30 …) are used as GOTO/GOSUB
+	// targets. The lexer emits TOKEN_LINENUMBER for integers that appear as
+	// the first token on a line.
+	//
+	// Labels (MyLabel:) are the modern equivalent of line numbers. The lexer
+	// detects them by spotting an identifier followed by ':' at the start of
+	// a line and emits TOKEN_LABEL with the colon already consumed.
 	TOKEN_LINENUMBER // 10, 20, 100 at start of line
-	TOKEN_LABEL      // MyLabel:
+	TOKEN_LABEL      // MyLabel:  (colon consumed; label name is the Literal)
 
 	// ---- Literal tokens: punctuation and operators ----
 	// Each single- or double-character symbol that has syntactic meaning gets
@@ -388,12 +436,27 @@ const (
 	TOKEN_META_EVENT    // $EVENT
 )
 
-// Token represents a lexical token with its type, literal value, and position.
+// Token is the fundamental unit of communication between the lexer and the parser.
+//
+// After the lexer produces a Token, the original source characters that formed
+// it are no longer needed — the parser works entirely with Token values. This
+// clean interface means the lexer and parser are fully decoupled: the lexer
+// could be replaced with a different implementation (or a hand-constructed
+// token stream for testing) without touching any parser code.
+//
+// Fields:
+//
+//   Type    — the category; used for all grammar decisions (O(1) int compare)
+//   Literal — the exact source text; used only when the value matters, e.g.:
+//             - number literals: the digit string to be parsed to float64
+//             - string literals: the content between the quotes (post-escape)
+//             - identifiers: the variable/function name
+//   Line, Column — source coordinates for error messages ("5:12: unexpected token")
 type Token struct {
-	Type    TokenType
-	Literal string
-	Line    int
-	Column  int
+	Type    TokenType // the token's category (see the TokenType constants above)
+	Literal string    // exact source text consumed to produce this token
+	Line    int       // 1-based source line of the first character of this token
+	Column  int       // 1-based byte column of the first character of this token
 }
 
 // Position returns a human-readable position string.
@@ -548,9 +611,24 @@ var keywords = map[string]TokenType{
 	"INSTAT":    TOKEN_INSTAT,
 }
 
-// LookupIdent returns the token type for an identifier.
-// If the identifier is a keyword, it returns the keyword token type.
-// Otherwise, it returns TOKEN_IDENTIFIER.
+// LookupIdent performs keyword disambiguation: given an uppercased word, it
+// returns the keyword's TokenType if the word is a reserved BASIC keyword, or
+// TOKEN_IDENTIFIER if it is a user-defined name.
+//
+// Tutorial note — why upper-case normalisation happens here
+//
+// Turbo BASIC is case-insensitive: "print", "Print", and "PRINT" are all the
+// same keyword. Rather than storing every possible case variant in the keywords
+// map, the lexer normalises the raw text to upper-case before calling this
+// function. The map therefore needs only one entry per keyword, keeping it
+// small and fast.
+//
+// The map lookup is O(1) average-case thanks to Go's built-in hash map. This
+// is better than the O(k) chain of string comparisons that a naive scanner
+// might use, and simpler than building a trie for the keyword set.
+//
+// User-defined names are never in the map, so they always fall through to
+// TOKEN_IDENTIFIER — no special handling required.
 func LookupIdent(ident string) TokenType {
 	if tok, ok := keywords[ident]; ok {
 		return tok

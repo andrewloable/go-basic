@@ -1,3 +1,55 @@
+// io.go — Console input/output functions for the BASIC runtime.
+//
+// # Compiler Design Note: BASIC's I/O Model
+//
+// Turbo BASIC provides a rich set of console I/O statements that are more
+// powerful than Go's fmt.Println:
+//
+//   - PRINT — outputs values separated by commas (zone tabs) or semicolons.
+//   - PRINT USING — formats output using a mini format language.
+//   - INPUT — reads comma-separated values from a single line.
+//   - LINE INPUT — reads a full line (no comma splitting).
+//   - LOCATE r,c — moves the text cursor using ANSI escape sequences.
+//   - CLS — clears the screen using ANSI escape sequences.
+//   - COLOR f,b — sets foreground/background using ANSI SGR codes.
+//
+// # ANSI Escape Sequences
+//
+// ANSI escape sequences are special byte sequences that most terminals
+// interpret as commands rather than visible characters. They begin with the
+// ESC character (byte 0x1B, written \033 in Go) followed by '[' and a
+// parameter string ending with a letter.
+//
+// Examples used here:
+//   - "\033[row;colH"   — move cursor to row, col (LOCATE)
+//   - "\033[2J\033[H"   — clear screen and home cursor (CLS)
+//   - "\033[fg;bgm"     — set SGR colour attributes (COLOR)
+//
+// The code generator emits fmt.Print(rt.AnsiLocate(r, c)) etc., so the
+// runtime returns strings and the generated code decides when to write them.
+//
+// # PRINT USING Format Language
+//
+// PRINT USING is a mini format language embedded inside a BASIC string:
+//
+//   "#"     — a digit position (leading spaces for unused positions)
+//   "."     — decimal point
+//   ","     — thousands separator (only between # characters)
+//   "+"     — force sign at leading or trailing position
+//   "-"     — trailing minus for negative numbers (space for positive)
+//   "$$"    — floating dollar sign (replaces leading space)
+//   "**"    — asterisk fill for leading spaces
+//   "**$"   — asterisk fill with floating dollar sign
+//   "^^^^"  — scientific notation (appended after digit spec)
+//   "!"     — first character of string only
+//   "&"     — full string
+//   "\ \"   — fixed-width string field (width = chars between backslashes + 2)
+//   "_x"    — output literal character x (escape)
+//
+// Implementing PRINT USING requires a two-pass parser: first scan the format
+// string into a list of literal and field segments, then apply values to fields
+// cyclically. See PrintUsing, parseNumericField, FormatNumber, FormatString.
+
 package runtime
 
 import (
@@ -11,10 +63,16 @@ import (
 // zoneWidth is the number of characters per PRINT zone (comma-separated values).
 const zoneWidth = 14
 
-// PrintZone formats values with 14-character zone tabs (BASIC's comma separator in PRINT).
-// When PRINT uses commas between values, each value occupies a 14-character zone.
-// col is the current 0-based column position; value is the string to print.
-// Returns the output string (padding + value) and the new column position.
+// PrintZone formats a value into the next 14-character print zone.
+//
+// BASIC's PRINT statement separates values with commas or semicolons:
+//   - Semicolon: no gap — values appear immediately adjacent.
+//   - Comma: jump to the next 14-character tab stop (zone).
+//
+// This function handles the comma case. col is the current 0-based column;
+// the function advances to the next multiple of zoneWidth and returns the
+// padded string plus the new column position. The generated code tracks the
+// column itself and passes it to each PrintZone call.
 func PrintZone(col int, value string) (output string, newCol int) {
 	// Advance to the next zone boundary.
 	zone := col / zoneWidth
@@ -731,9 +789,10 @@ func Spc(n int) string {
 	return strings.Repeat(" ", n)
 }
 
-// InputPrompt displays a prompt and reads input from stdin, returning the raw line.
-// If the user provides empty input, it re-prompts. The prompt is displayed with "? "
-// appended if it doesn't already end with a question mark.
+// InputPrompt displays a prompt to stdout and reads one line from stdin.
+// BASIC: INPUT "prompt"; var — the runtime prints the prompt then waits.
+// The returned string is the raw line with the trailing newline stripped; the
+// generated code then converts it to the variable's target type.
 func InputPrompt(prompt string) string {
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -754,9 +813,15 @@ func NewScanner() *bufio.Scanner {
 	return bufio.NewScanner(os.Stdin)
 }
 
-// InputSplitLine reads one line from stdin and splits it by commas, returning
-// the trimmed parts. This implements BASIC's multi-variable INPUT semantics:
-// the user types all values on one line separated by commas.
+// InputSplitLine reads one line from stdin and splits it on commas.
+//
+// BASIC's INPUT statement accepts multiple variables on a single line:
+//
+//	INPUT a, b, c
+//
+// The user types "1, 2, 3" and BASIC assigns each comma-delimited token to the
+// corresponding variable. The generated code calls InputSplitLine() once and
+// then indexes the returned slice — one element per variable in the INPUT list.
 func InputSplitLine() []string {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
@@ -768,25 +833,33 @@ func InputSplitLine() []string {
 	return parts
 }
 
-// AnsiLocate returns ANSI escape sequence to move cursor to row, col (1-based).
+// AnsiLocate returns the ANSI CSI escape sequence that moves the terminal
+// cursor to the given row and column (both 1-based, matching BASIC's LOCATE).
+// The generated code calls fmt.Print(rt.AnsiLocate(r, c)) for LOCATE r,c.
 func AnsiLocate(row, col int) string {
 	return fmt.Sprintf("\033[%d;%dH", row, col)
 }
 
-// AnsiCls returns ANSI escape sequence to clear the screen and move cursor to home.
+// AnsiCls returns the ANSI escape sequence that clears the terminal screen
+// and moves the cursor to the top-left corner (home position).
+// Generated code emits fmt.Print(rt.AnsiCls()) for the BASIC CLS statement.
 func AnsiCls() string {
 	return "\033[2J\033[H"
 }
 
-// AnsiColor returns ANSI escape sequence for the given BASIC color codes (0-15).
-// BASIC color codes map to ANSI SGR codes:
+// AnsiColor returns the ANSI SGR escape sequence for the given BASIC color codes.
+//
+// BASIC COLOR fg, bg uses a 16-color palette derived from CGA hardware:
 //
 //	0=black, 1=blue, 2=green, 3=cyan, 4=red, 5=magenta,
 //	6=brown/dark yellow, 7=white/light gray, 8=dark gray, 9=light blue,
 //	10=light green, 11=light cyan, 12=light red, 13=light magenta,
 //	14=yellow, 15=bright white
 //
-// fg and bg are BASIC color codes (0-15). fg applies to foreground, bg to background.
+// ANSI SGR foreground codes are 30-37 (normal) and 90-97 (bright). Background
+// codes are foreground + 10. The mapping is not a simple offset because BASIC
+// and ANSI order their colours differently — the switch tables in basicToAnsiFg
+// and basicToAnsiBg encode the translation explicitly.
 func AnsiColor(fg, bg int) string {
 	fgCode := basicToAnsiFg(fg)
 	bgCode := basicToAnsiBg(bg)

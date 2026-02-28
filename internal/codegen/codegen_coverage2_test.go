@@ -1575,8 +1575,8 @@ func TestEmitStatementError(t *testing.T) {
 		},
 	}
 	out := generate(t, stmts)
-	if !strings.Contains(out, "TODO: ERROR") {
-		t.Errorf("ERROR: expected 'TODO: ERROR' in output, got:\n%s", out)
+	if !strings.Contains(out, "TriggerError") {
+		t.Errorf("ERROR: expected 'TriggerError' in output, got:\n%s", out)
 	}
 }
 

@@ -42,7 +42,12 @@
       "Bash(/tmp/test_randomize.go:*)",
       "Bash(grep:*)",
       "Bash(/tmp/test_compile.go:*)",
-      "Bash(go:*)"
+      "Bash(go:*)",
+      "Bash(find:*)",
+      "Bash(do:*)",
+      "Bash(wc:*)",
+      "Bash(internal/vm/compiler_test.go:*)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }

@@ -89,10 +89,29 @@ func New(input string) *Lexer {
 	return l
 }
 
-// readChar advances the lexer by one character.
+// readChar advances the lexer cursor by exactly one byte.
+//
+// The pattern of maintaining two indices (pos and readPos) is called a
+// "two-pointer sliding window" and is a classic technique for implementing
+// one-character lookahead without a separate buffer:
+//
+//   pos      — points at the byte currently stored in l.ch (already read)
+//   readPos  — points at the NEXT byte to be read
+//
+// After readChar() returns:
+//   old readPos → new pos
+//   new readPos → old readPos + 1
+//   l.ch        → the byte at new pos (or 0 if past end)
+//
+// Setting l.ch = 0 at end-of-input is a sentinel value (NUL byte). All
+// character-class predicates (isLetter, isDigit) return false for 0, so the
+// lexer naturally stops consuming characters when it hits the end of input.
+//
+// Byte counting (l.col++) keeps the column coordinate accurate for error
+// messages. Line counting is handled separately in readNewline().
 func (l *Lexer) readChar() {
 	if l.readPos >= len(l.input) {
-		l.ch = 0
+		l.ch = 0 // sentinel: NUL byte signals end of input
 	} else {
 		l.ch = l.input[l.readPos]
 	}
@@ -101,7 +120,22 @@ func (l *Lexer) readChar() {
 	l.col++
 }
 
-// peekChar returns the next character without advancing.
+// peekChar returns the next character without advancing the cursor.
+//
+// This is the one-character lookahead that lets the lexer resolve ambiguities
+// involving two-character tokens:
+//
+//   '<'  followed by '>'  → TOKEN_NE  ("<>")
+//   '<'  followed by '='  → TOKEN_LE  ("<=")
+//   '&'  followed by 'H'  → start of hex literal ("&H...")
+//   first digit of float  → peek after '.' to distinguish "1.5" from ".."
+//
+// peekChar() reads directly from l.input[l.readPos] without modifying pos,
+// readPos, or ch, so the cursor position is unchanged after the call. The
+// character returned is valid only until the next readChar() call.
+//
+// If there is no next character (end of input), peekChar returns 0 (NUL),
+// the same sentinel used by readChar().
 func (l *Lexer) peekChar() byte {
 	if l.readPos >= len(l.input) {
 		return 0
@@ -109,7 +143,15 @@ func (l *Lexer) peekChar() byte {
 	return l.input[l.readPos]
 }
 
-// skipWhitespace skips spaces and tabs (but not newlines).
+// skipWhitespace advances past spaces and tabs only.
+//
+// Critically, newlines (\r and \n) are NOT skipped here. In BASIC, a newline
+// ends a statement — it is semantically significant. The lexer emits TOKEN_EOL
+// for newlines so the parser can detect statement boundaries. Treating newlines
+// as ignorable whitespace (like C does) would break BASIC's line-oriented syntax.
+//
+// Tab characters (\t) ARE skipped because they are purely visual indentation;
+// BASIC does not use tabs for semantic purposes (unlike Python).
 func (l *Lexer) skipWhitespace() {
 	for l.ch == ' ' || l.ch == '\t' {
 		l.readChar()
@@ -596,7 +638,25 @@ func (l *Lexer) readMetacommand() Token {
 	return tok
 }
 
-// readOperatorOrPunctuation reads operator and punctuation tokens.
+// readOperatorOrPunctuation produces a Token for a single- or double-character
+// operator or punctuation symbol.
+//
+// Most operators are a single character ('+', '-', '=', …). The three
+// two-character operators in BASIC (<>, <=, >=) are handled by peeking at the
+// next character: if it completes a two-character operator, both characters are
+// consumed in one call; otherwise only the first is consumed.
+//
+// For example, when the current character is '<':
+//
+//   peekChar() == '>'  → consume both, emit TOKEN_NE (literal "<>")
+//   peekChar() == '='  → consume both, emit TOKEN_LE (literal "<=")
+//   anything else      → consume only '<', emit TOKEN_LT (literal "<")
+//
+// This eager (maximal-munch) strategy — always consume the longest valid token
+// — is the standard rule for lexers and prevents ambiguity.
+//
+// Unrecognised characters fall to the default case and emit TOKEN_ILLEGAL.
+// The parser will then report an "unexpected token" error and attempt recovery.
 func (l *Lexer) readOperatorOrPunctuation() Token {
 	tok := Token{Line: l.line, Column: l.col}
 
@@ -683,7 +743,21 @@ func (l *Lexer) readOperatorOrPunctuation() Token {
 	return tok
 }
 
-// AllTokens lexes the entire input and returns all tokens.
+// AllTokens lexes the entire input eagerly and returns the full token slice.
+//
+// This is a convenience method primarily used in tests and debug tools. It is
+// NOT used by the parser in normal compilation — the parser calls NextToken()
+// lazily (one token at a time), which keeps memory use proportional to the
+// two-token window rather than the entire file size.
+//
+// AllTokens is useful for:
+//   - Unit tests that need to assert on the exact token sequence
+//   - Debuggers/pretty-printers that want to display all tokens at once
+//   - Fuzz testing that needs a deterministic token count
+//
+// The loop always terminates because NextToken() is guaranteed to advance the
+// cursor by at least one byte per call, and TOKEN_EOF is emitted when pos
+// reaches the end of the input.
 func (l *Lexer) AllTokens() []Token {
 	var tokens []Token
 	for {
@@ -696,14 +770,32 @@ func (l *Lexer) AllTokens() []Token {
 	return tokens
 }
 
+// isLetter returns true if ch is a Unicode letter.
+//
+// Using unicode.IsLetter (rather than 'a' <= ch <= 'z') means the lexer
+// correctly handles identifiers with accented or non-ASCII letters, which is
+// rare in BASIC but occasionally found in localised programs. The cost is a
+// rune conversion per character, which is negligible for typical identifier
+// lengths.
 func isLetter(ch byte) bool {
 	return unicode.IsLetter(rune(ch))
 }
 
+// isDigit returns true if ch is an ASCII decimal digit (0–9).
+//
+// An ASCII range check (ch >= '0' && ch <= '9') is faster than calling
+// unicode.IsDigit because it avoids the overhead of Unicode classification.
+// For decimal digits this is correct: BASIC only uses ASCII numerals in
+// numeric literals.
 func isDigit(ch byte) bool {
 	return ch >= '0' && ch <= '9'
 }
 
+// isHexDigit returns true if ch is a valid hexadecimal digit (0–9, A–F, a–f).
+//
+// Hex digits are used exclusively inside &H… literals. Both upper-case and
+// lower-case letters are accepted so that "&H1a" and "&H1A" are both valid —
+// a concession to programmer convenience that costs nothing at this level.
 func isHexDigit(ch byte) bool {
 	return isDigit(ch) || (ch >= 'A' && ch <= 'F') || (ch >= 'a' && ch <= 'f')
 }

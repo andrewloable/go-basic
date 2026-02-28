@@ -1,3 +1,46 @@
+// errors.go — Structured error handling for the BASIC runtime.
+//
+// # Compiler Design Note: BASIC's Error Handling Model
+//
+// Turbo BASIC's error handling is fundamentally different from Go's:
+//
+//	ON ERROR GOTO label  — install a global error handler; all subsequent
+//	                       runtime errors jump to 'label' instead of aborting.
+//	ERR                  — integer variable holding the last error code.
+//	ERL                  — integer variable holding the line number of the error.
+//	RESUME               — after handling, jump back to the statement that failed.
+//	RESUME NEXT          — after handling, continue at the statement after the error.
+//	RESUME label         — after handling, jump to a specific label.
+//	ERROR n              — manually raise error n (like Go's panic).
+//
+// This is a non-local control flow mechanism similar to setjmp/longjmp in C or
+// try/catch in Java — but BASIC's version is global (only one handler at a time)
+// and is not scoped to a call stack frame.
+//
+// # Implementation Strategy
+//
+// Because Go does not have a setjmp equivalent, the generated code implements
+// BASIC error handling using a combination of:
+//
+//  1. ErrorState — a struct that holds the handler label, last error, ERR, and ERL.
+//  2. TriggerError — called at every potential error site; if a handler is active
+//     it returns the error (and generated code checks the return value to jump to
+//     the handler label via a Go switch on a state variable); otherwise it panics.
+//  3. defer + recover — in the generated program's main function, a deferred
+//     function catches panics from unhandled BASIC errors and prints them.
+//
+// This is an example of the N-way control flow problem in transpilers: the source
+// language has control flow primitives (GOTO, ON ERROR, RESUME) that do not map
+// cleanly to the target language. The solution is to encode the control flow
+// state explicitly in a runtime variable and translate each jump to a Go switch
+// or for-loop that checks that variable.
+//
+// # Error Code Table
+//
+// BASIC errors are identified by numeric codes (ERR = 5 means "Illegal function
+// call"). The table below maps codes to human-readable messages. These codes are
+// standardised across Microsoft BASIC dialects.
+
 package runtime
 
 import "fmt"
@@ -36,11 +79,16 @@ var basicErrorMessages = map[int]string{
 	76: "Path not found",
 }
 
-// BasicError represents a Turbo BASIC runtime error.
+// BasicError represents a Turbo BASIC runtime error with its numeric code,
+// human-readable message, and the source line number where it occurred.
+//
+// This struct satisfies Go's error interface so it can be used in standard
+// Go error-handling patterns (errors.Is, fmt.Errorf wrapping, etc.) while
+// also carrying the BASIC-specific fields that ERR and ERL expose to programs.
 type BasicError struct {
-	Code    int    // ERR - error code
-	Message string // human-readable description
-	Line    int    // ERL - line where error occurred
+	Code    int    // ERR - error code visible to BASIC programs via the ERR variable
+	Message string // human-readable description of the error
+	Line    int    // ERL - the BASIC source line number where the error occurred
 }
 
 // Error implements the error interface.
@@ -51,13 +99,22 @@ func (e *BasicError) Error() string {
 	return fmt.Sprintf("Error %d: %s", e.Code, e.Message)
 }
 
-// ErrorState holds global error handling state for ON ERROR / RESUME.
+// ErrorState holds the mutable global state that BASIC's error handling model
+// requires. There is exactly one ErrorState per generated program, created at
+// startup and passed (via pointer) to every generated function that can raise
+// an error.
+//
+// Fields mirror the BASIC programmer's view:
+//   - HandlerActive / HandlerLabel — set by "ON ERROR GOTO label".
+//   - LastError / LastERR / LastERL — readable via the ERR and ERL variables.
+//   - ResumeLabel — set by the RESUME statement so the handler can jump back.
 type ErrorState struct {
-	HandlerActive bool         // ON ERROR GOTO is set
-	HandlerLabel  string       // target label
-	LastError     *BasicError  // most recent error
-	LastERL       int          // line of last error (ERL)
-	LastERR       int          // code of last error (ERR)
+	HandlerActive bool        // true when ON ERROR GOTO has been executed
+	HandlerLabel  string      // the label to jump to on error
+	LastError     *BasicError // the most recently triggered error (nil if none)
+	LastERL       int         // line number of the last error (BASIC's ERL)
+	LastERR       int         // error code of the last error (BASIC's ERR)
+	ResumeLabel   string      // label to jump back to for a bare RESUME statement
 }
 
 // NewErrorState creates a fresh error state.
@@ -65,9 +122,19 @@ func NewErrorState() *ErrorState {
 	return &ErrorState{}
 }
 
-// TriggerError creates and stores a BasicError. If a handler is active, it
-// returns the error for the calling code to jump to the handler. Otherwise,
-// it panics with the error (unhandled BASIC runtime error).
+// TriggerError creates a BasicError, records it in the ErrorState, and either
+// returns it (when a handler is active) or panics (when no handler is set).
+//
+// Generated code calls this at every potential error site:
+//
+//	if err := _es.TriggerError(5, 42); err != nil {
+//	    _gotoLabel = "errorHandler"
+//	    goto _dispatch
+//	}
+//
+// The nil-vs-non-nil return value is the bridge between BASIC's ON ERROR model
+// and Go's structured control flow. When no handler is active, panicking lets
+// Go's own stack unwinding and a top-level recover() print a clean error message.
 func (es *ErrorState) TriggerError(code int, line int) *BasicError {
 	msg := ErrorMessage(code)
 	err := &BasicError{
