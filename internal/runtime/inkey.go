@@ -67,6 +67,12 @@ func RestoreTerminal() {
 // On first call it switches stdin to raw mode. If stdin is not a tty (piped),
 // it always returns "".
 func Inkey() string {
+	// When the Ebitengine graphics window is active, read keys from it
+	// instead of the terminal.
+	if IsGraphicsMode() {
+		return InkeyFromGraphics()
+	}
+
 	if !termRaw {
 		if !initRawTerminal() {
 			return "" // not a terminal — degrade gracefully

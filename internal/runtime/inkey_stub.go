@@ -1,4 +1,4 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package runtime
 
@@ -6,6 +6,10 @@ package runtime
 // Returns empty string if no key is available. This stub is used on platforms
 // where raw terminal I/O is not implemented.
 func Inkey() string {
+	// When the Ebitengine graphics window is active, read keys from it.
+	if IsGraphicsMode() {
+		return InkeyFromGraphics()
+	}
 	return ""
 }
 

@@ -84,6 +84,8 @@ type Screen struct {
 	DrawColor byte // current draw color (set by Draw "Cn")
 	DrawScale int  // draw scale (default 1)
 	DrawAngle int  // draw angle 0-3 (0=0°,1=90°,2=180°,3=270°)
+	FgColor   byte // foreground color set by COLOR statement (default 15 for screen modes)
+	BgColor   byte // background color set by COLOR statement (default 0)
 }
 
 // defaultPalette returns the default color palette for the given number of colors.
@@ -182,11 +184,19 @@ func ScreenMode(mode int) {
 		CursorY:   0,
 		Palette:   defaultPalette(spec.c),
 		DrawScale: 1,
+		FgColor:   byte(spec.c - 1), // default foreground: highest palette index (e.g. 15 for 16-color)
+		BgColor:   0,
 	}
 	if mode != 0 {
 		s.Framebuffer = allocFramebuffer(spec.w, spec.h)
 	}
+	// Close any existing graphics window before switching modes.
+	CloseGraphicsWindow()
 	CurrentScreen = s
+	// Open a graphics window for non-text modes.
+	if mode != 0 {
+		OpenGraphicsWindow()
+	}
 }
 
 // ClearScreen fills the framebuffer with color index 0 (background).
@@ -275,10 +285,37 @@ func Pset(x, y, color float64) {
 	pset(int(x), int(y), byte(color))
 }
 
-// Point returns the color attribute of the pixel at screen coordinates (x, y).
-// In the terminal-based stub implementation, this always returns 0 (background).
+// Point returns the color palette index of the pixel at screen coordinates (x, y).
+// Returns 0 if the framebuffer is nil or the coordinates are out of bounds.
 func Point(x, y float64) float64 {
-	return 0
+	s := CurrentScreen
+	fb := s.Framebuffer
+	if fb == nil {
+		return 0
+	}
+	ix, iy := int(x), int(y)
+	if iy < 0 || iy >= len(fb) || ix < 0 || ix >= len(fb[iy]) {
+		return 0
+	}
+	return float64(fb[iy][ix])
+}
+
+// SetGraphicsColor sets the foreground and background color for graphics mode.
+// Called by the COLOR statement when in a SCREEN mode.
+func SetGraphicsColor(fg, bg int) {
+	s := CurrentScreen
+	if fg >= 0 && fg < s.Colors {
+		s.FgColor = byte(fg)
+	}
+	if bg >= 0 && bg < s.Colors {
+		s.BgColor = byte(bg)
+	}
+}
+
+// GetForegroundColor returns the current foreground color index (for use as
+// the default drawing color when PSET/LINE/CIRCLE omit the color argument).
+func GetForegroundColor() float64 {
+	return float64(CurrentScreen.FgColor)
 }
 
 // DrawLine draws a line or box. boxMode is "", "B", or "BF".

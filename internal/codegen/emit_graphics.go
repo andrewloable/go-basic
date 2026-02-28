@@ -14,9 +14,9 @@ func (g *CodeGenerator) emitCircle(s *ast.CircleStmt) {
 	x := g.emitExpr(s.X)
 	y := g.emitExpr(s.Y)
 	radius := g.emitExpr(s.Radius)
-	color := "15"
+	color := "rt.GetForegroundColor()"
 	if s.Color != nil {
-		color = g.emitExpr(s.Color)
+		color = "float64(" + g.emitExpr(s.Color) + ")"
 	}
 	start := "0"
 	if s.Start != nil {
@@ -30,7 +30,7 @@ func (g *CodeGenerator) emitCircle(s *ast.CircleStmt) {
 	if s.Aspect != nil {
 		aspect = g.emitExpr(s.Aspect)
 	}
-	g.writeLinef("rt.Circle(float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), float64(%s))",
+	g.writeLinef("rt.Circle(float64(%s), float64(%s), float64(%s), %s, float64(%s), float64(%s), float64(%s))",
 		x, y, radius, color, start, end, aspect)
 }
 
@@ -45,37 +45,37 @@ func (g *CodeGenerator) emitLine(s *ast.LineStmt) {
 	}
 	x2 := g.emitExpr(s.X2)
 	y2 := g.emitExpr(s.Y2)
-	color := "15"
+	color := "rt.GetForegroundColor()"
 	if s.Color != nil {
-		color = g.emitExpr(s.Color)
+		color = "float64(" + g.emitExpr(s.Color) + ")"
 	}
 	boxMode := strconv.Quote(s.BoxMode)
-	g.writeLinef("rt.DrawLine(float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), %s)",
+	g.writeLinef("rt.DrawLine(float64(%s), float64(%s), float64(%s), float64(%s), %s, %s)",
 		x1, y1, x2, y2, color, boxMode)
 }
 
 func (g *CodeGenerator) emitPset(s *ast.PsetStatement) {
 	x := g.emitExpr(s.X)
 	y := g.emitExpr(s.Y)
-	color := "15"
+	color := "rt.GetForegroundColor()"
 	if s.Color != nil {
-		color = g.emitExpr(s.Color)
+		color = "float64(" + g.emitExpr(s.Color) + ")"
 	}
-	g.writeLinef("rt.Pset(float64(%s), float64(%s), float64(%s))", x, y, color)
+	g.writeLinef("rt.Pset(float64(%s), float64(%s), %s)", x, y, color)
 }
 
 func (g *CodeGenerator) emitPaint(s *ast.PaintStmt) {
 	x := g.emitExpr(s.X)
 	y := g.emitExpr(s.Y)
-	fillColor := "15"
+	fillColor := "rt.GetForegroundColor()"
 	if s.FillColor != nil {
-		fillColor = g.emitExpr(s.FillColor)
+		fillColor = "float64(" + g.emitExpr(s.FillColor) + ")"
 	}
 	borderColor := fillColor
 	if s.BorderColor != nil {
-		borderColor = g.emitExpr(s.BorderColor)
+		borderColor = "float64(" + g.emitExpr(s.BorderColor) + ")"
 	}
-	g.writeLinef("rt.Paint(float64(%s), float64(%s), float64(%s), float64(%s))", x, y, fillColor, borderColor)
+	g.writeLinef("rt.Paint(float64(%s), float64(%s), %s, %s)", x, y, fillColor, borderColor)
 }
 
 func (g *CodeGenerator) emitView(s *ast.ViewStatement) {
@@ -144,5 +144,8 @@ func (g *CodeGenerator) emitColor(s *ast.ColorStatement) {
 	if s.Background != nil {
 		bg = g.emitExpr(s.Background)
 	}
+	// Set ANSI terminal colors (text mode).
 	g.writeLinef("fmt.Print(rt.AnsiColor(int(%s), int(%s)))", fg, bg)
+	// Also set graphics foreground/background for PSET/LINE/CIRCLE defaults.
+	g.writeLinef("rt.SetGraphicsColor(int(%s), int(%s))", fg, bg)
 }

@@ -49,7 +49,10 @@
       "Bash(internal/vm/compiler_test.go:*)",
       "mcp__ide__getDiagnostics",
       "Bash(internal/vm/debug_vm_test.go:*)",
-      "Bash(go tool:*)"
+      "Bash(go tool:*)",
+      "Bash(/tmp/run_bas.go:*)",
+      "Bash(./basicc compile:*)",
+      "Bash(GOBASIC_HEADLESS=1 go test:*)"
     ]
   }
 }

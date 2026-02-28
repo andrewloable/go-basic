@@ -25,8 +25,10 @@
 package runtime
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"strings"
 	"time"
 )
@@ -99,13 +101,21 @@ func Shell(command string) error {
 	return cmd.Run()
 }
 
-// Fre returns a plausible estimate of available memory (BASIC's FRE function).
+// Fre returns an estimate of available memory (BASIC's FRE function).
 // BASIC: FRE(0) or FRE("") — on DOS this returned the number of free bytes in the
-// BASIC heap or string space. Go's garbage collector manages memory automatically
-// and does not expose a simple "free bytes" figure, so we return a constant that
-// is large enough not to alarm programs that check it before large allocations.
+// BASIC heap or string space. Go's garbage collector manages memory automatically,
+// so we report approximate free heap memory from runtime.MemStats.
 func Fre(_ float64) float64 {
-	return 32768 // Return a plausible constant; GC manages actual memory.
+	var m goruntime.MemStats
+	goruntime.ReadMemStats(&m)
+	// Approximate free memory: total system memory minus heap in use.
+	free := m.Sys - m.HeapInuse
+	// Cap to a reasonable range for BASIC programs (max ~2GB).
+	const maxFree = 2 * 1024 * 1024 * 1024 // 2 GB
+	if free > maxFree {
+		free = maxFree
+	}
+	return float64(free)
 }
 
 // Peek reads a byte from a DOS memory address — stub that always returns 0.
@@ -120,7 +130,8 @@ func Fre(_ float64) float64 {
 // BASIC programs that use PEEK only for timing or display detection will still
 // compile; programs that critically depend on specific hardware memory layouts
 // will need manual porting.
-func Peek(_ float64) float64 {
+func Peek(addr float64) float64 {
+	peekPokeWarnOnce()
 	return 0
 }
 
@@ -132,8 +143,21 @@ func Peek(_ float64) float64 {
 //
 // For the same reasons as Peek, this cannot be implemented meaningfully in a
 // modern OS process and is a documented no-op.
-func Poke(_, _ float64) {
-	// Memory-mapped I/O is not available in transpiled Go code.
+func Poke(addr, val float64) {
+	peekPokeWarnOnce()
+}
+
+var peekPokeWarned bool
+
+// peekPokeWarnOnce prints a one-time warning to stderr when GOBASIC_PEEK_WARN=1.
+func peekPokeWarnOnce() {
+	if peekPokeWarned {
+		return
+	}
+	peekPokeWarned = true
+	if os.Getenv("GOBASIC_PEEK_WARN") == "1" {
+		fmt.Fprintln(os.Stderr, "Warning: PEEK/POKE — DOS memory access is not available in transpiled code. These calls are no-ops.")
+	}
 }
 
 // SwapInt swaps two int values via pointers.
