@@ -127,6 +127,14 @@ type Compiler struct {
 	// Set by DEFINT/DEFLNG/DEFSNG/DEFDBL/DEFSTR statements.
 	// Index 0 = 'A', index 25 = 'Z'.  Empty string means use default (float).
 	defTypeMap [26]string
+
+	// declaredFuncs records names that are known to be user-defined SUBs or
+	// FUNCTIONs — populated from DECLARE SUB/FUNCTION (forward declarations)
+	// and from the actual body declarations.  Used by compileArrayAccess to
+	// distinguish a user-function call like Factorial(n) (parsed by the parser
+	// as *ast.ArrayAccess because it is an unknown identifier) from a genuine
+	// array element access.
+	declaredFuncs map[string]bool
 }
 
 // loopInfo tracks a loop context for EXIT/break handling.
@@ -162,14 +170,15 @@ type subPatch struct {
 // will still work but without access to semantic information.
 func NewCompiler(table *semantic.SymbolTable) *Compiler {
 	return &Compiler{
-		chunk:      &Chunk{},
-		table:      table,
-		varIndex:   make(map[string]int32),
-		labelAddrs: make(map[string]int),
-		subAddrs:   make(map[string]int),
-		constMap:   make(map[string]Value),
-		defFnMap:   make(map[string]*ast.DefFnDeclaration),
-		typeDefMap: make(map[string][]ast.TypeField),
+		chunk:         &Chunk{},
+		table:         table,
+		varIndex:      make(map[string]int32),
+		labelAddrs:    make(map[string]int),
+		subAddrs:      make(map[string]int),
+		constMap:      make(map[string]Value),
+		defFnMap:      make(map[string]*ast.DefFnDeclaration),
+		typeDefMap:    make(map[string][]ast.TypeField),
+		declaredFuncs: make(map[string]bool),
 	}
 }
 

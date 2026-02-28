@@ -47,7 +47,9 @@
       "Bash(do:*)",
       "Bash(wc:*)",
       "Bash(internal/vm/compiler_test.go:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(internal/vm/debug_vm_test.go:*)",
+      "Bash(go tool:*)"
     ]
   }
 }

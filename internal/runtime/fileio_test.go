@@ -859,3 +859,320 @@ func TestGetFileNotOpen(t *testing.T) {
 		t.Fatal("expected error for non-open file")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// getWriter — both branches (Writer nil and Writer already set)
+// ---------------------------------------------------------------------------
+
+func TestGetWriterNilBranch(t *testing.T) {
+	// FileOpen for Output pre-sets bf.Writer, so to hit the nil branch we use
+	// FileModeBinary which does NOT pre-set Writer, then call FileWrite.
+	fm := NewFileManager()
+	path := tempFile(t, "getwriter_nil.dat")
+
+	err := fm.FileOpen(1, path, FileModeBinary, 0)
+	if err != nil {
+		t.Fatalf("FileOpen binary: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	// FileWrite calls getWriter; bf.Writer is nil → creates new writer.
+	if err := fm.FileWrite(1, "first"); err != nil {
+		t.Fatalf("FileWrite (nil writer): %v", err)
+	}
+	// Second call: bf.Writer is now non-nil → returns existing writer.
+	if err := fm.FileWrite(1, "second"); err != nil {
+		t.Fatalf("FileWrite (existing writer): %v", err)
+	}
+}
+
+func TestGetWriterNonNilBranch(t *testing.T) {
+	// For Output mode, FileOpen pre-sets Writer (non-nil path immediately).
+	fm := NewFileManager()
+	path := tempFile(t, "getwriter_nonnull.txt")
+
+	err := fm.FileOpen(1, path, FileModeOutput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen output: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	// Both calls hit the non-nil branch (Writer was set by FileOpen).
+	fm.FilePrint(1, "hello")
+	fm.FilePrint(1, "world")
+}
+
+// ---------------------------------------------------------------------------
+// FileInput — quoted strings, CRLF, doubled quotes
+// ---------------------------------------------------------------------------
+
+func TestFileInputQuotedString(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "quoted.txt")
+
+	// Write a quoted CSV-style field.
+	err := fm.FileOpen(1, path, FileModeOutput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen output: %v", err)
+	}
+	fm.FileWrite(1, "hello world")
+	fm.FileClose(1)
+
+	// Now read it back via FileInput.
+	err = fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen input: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	got, err := fm.FileInput(1)
+	if err != nil {
+		t.Fatalf("FileInput quoted: %v", err)
+	}
+	if got != "hello world" {
+		t.Errorf("FileInput quoted = %q, want %q", got, "hello world")
+	}
+}
+
+func TestFileInputDoubledQuote(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "dquote.txt")
+
+	// Write a string that contains a quote (FileWrite uses doubled-quote escaping).
+	err := fm.FileOpen(1, path, FileModeOutput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen output: %v", err)
+	}
+	fm.FileWrite(1, `say "hi"`)
+	fm.FileClose(1)
+
+	err = fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen input: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	got, err := fm.FileInput(1)
+	if err != nil {
+		t.Fatalf("FileInput doubled quote: %v", err)
+	}
+	if got != `say "hi"` {
+		t.Errorf("FileInput doubled quote = %q, want %q", got, `say "hi"`)
+	}
+}
+
+func TestFileInputCRLF(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "crlf.txt")
+
+	// Write a file with CRLF line endings manually.
+	if err := os.WriteFile(path, []byte("line1\r\nline2\r\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	got, err := fm.FileInput(1)
+	if err != nil {
+		t.Fatalf("FileInput CRLF first: %v", err)
+	}
+	if got != "line1" {
+		t.Errorf("FileInput CRLF = %q, want %q", got, "line1")
+	}
+}
+
+func TestFileInputCROnly(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "cronly.txt")
+
+	// CR alone as line terminator.
+	if err := os.WriteFile(path, []byte("lineA\rlineB\r"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	got, err := fm.FileInput(1)
+	if err != nil {
+		t.Fatalf("FileInput CR-only: %v", err)
+	}
+	if got != "lineA" {
+		t.Errorf("FileInput CR-only = %q, want %q", got, "lineA")
+	}
+}
+
+func TestFileInputEOFInsideQuote(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "eofinquote.txt")
+
+	// Quoted string that has EOF before closing quote.
+	if err := os.WriteFile(path, []byte(`"unterminated`), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	got, err := fm.FileInput(1)
+	if err != nil {
+		t.Fatalf("FileInput EOF in quote: %v", err)
+	}
+	// Should return whatever was read before EOF.
+	if got != "unterminated" {
+		t.Errorf("FileInput EOF in quote = %q, want %q", got, "unterminated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lset / Rset — num == 0 (search all files) and value longer than field
+// ---------------------------------------------------------------------------
+
+func TestLsetNumZeroFindsField(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "lset0.dat")
+
+	fm.FileOpen(1, path, FileModeRandom, 20)
+	fm.Field(1, []FieldDef{{Name: "name", Length: 10}})
+
+	// num == 0: search all open files.
+	err := fm.Lset(0, "name", "Alice")
+	if err != nil {
+		t.Fatalf("Lset(0,...): %v", err)
+	}
+	got, _ := fm.GetFieldValue(1, "name")
+	// Should be left-justified, padded with spaces.
+	if !strings.HasPrefix(got, "Alice") {
+		t.Errorf("Lset(0) result = %q, want prefix 'Alice'", got)
+	}
+	fm.FileClose(1)
+}
+
+func TestLsetNumZeroNotFound(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "lset0nf.dat")
+	fm.FileOpen(1, path, FileModeRandom, 20)
+	fm.Field(1, []FieldDef{{Name: "x", Length: 10}})
+
+	err := fm.Lset(0, "nonexistent", "val")
+	if err == nil {
+		t.Fatal("Lset(0,...) with no matching field should return error")
+	}
+	fm.FileClose(1)
+}
+
+func TestRsetNumZeroFindsField(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "rset0.dat")
+
+	fm.FileOpen(1, path, FileModeRandom, 20)
+	fm.Field(1, []FieldDef{{Name: "city", Length: 10}})
+
+	err := fm.Rset(0, "city", "NY")
+	if err != nil {
+		t.Fatalf("Rset(0,...): %v", err)
+	}
+	got, _ := fm.GetFieldValue(1, "city")
+	if !strings.HasSuffix(strings.TrimRight(got, " "), "NY") && !strings.Contains(got, "NY") {
+		t.Errorf("Rset(0) result = %q, want 'NY' right-justified", got)
+	}
+	fm.FileClose(1)
+}
+
+func TestRsetNumZeroNotFound(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "rset0nf.dat")
+	fm.FileOpen(1, path, FileModeRandom, 20)
+	fm.Field(1, []FieldDef{{Name: "x", Length: 10}})
+
+	err := fm.Rset(0, "nonexistent", "val")
+	if err == nil {
+		t.Fatal("Rset(0,...) with no matching field should return error")
+	}
+	fm.FileClose(1)
+}
+
+func TestRsetValueLongerThanField(t *testing.T) {
+	// Value longer than field → truncate from end (start < 0 branch).
+	fm := NewFileManager()
+	path := tempFile(t, "rset_long.dat")
+
+	fm.FileOpen(1, path, FileModeRandom, 20)
+	fm.Field(1, []FieldDef{{Name: "code", Length: 3}})
+
+	err := fm.Rset(1, "code", "toolongvalue")
+	if err != nil {
+		t.Fatalf("Rset long value: %v", err)
+	}
+	got, _ := fm.GetFieldValue(1, "code")
+	if len(got) != 3 {
+		t.Errorf("Rset long value: field length = %d, want 3", len(got))
+	}
+	fm.FileClose(1)
+}
+
+func TestLsetNoFile(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.Lset(1, "field", "value")
+	if err == nil {
+		t.Error("expected error for Lset on closed file")
+	}
+}
+
+func TestRsetNoFile(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.Rset(1, "field", "value")
+	if err == nil {
+		t.Error("expected error for Rset on closed file")
+	}
+}
+
+func TestFileWriteNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.FileWrite(99, []interface{}{"test"})
+	if err == nil {
+		t.Error("expected error writing to unopened file")
+	}
+}
+
+func TestFilePrintNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.FilePrint(99, " hello")
+	if err == nil {
+		t.Error("expected error printing to unopened file")
+	}
+}
+
+func TestEofNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	_, err := fm.Eof(99)
+	if err == nil {
+		t.Error("expected error for Eof on closed file")
+	}
+}
+
+func TestLocNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	_, err := fm.Loc(99)
+	if err == nil {
+		t.Error("expected error for Loc on closed file")
+	}
+}
+
+func TestLofNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	_, err := fm.Lof(99)
+	if err == nil {
+		t.Error("expected error for Lof on closed file")
+	}
+}

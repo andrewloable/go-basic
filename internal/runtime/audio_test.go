@@ -229,3 +229,11 @@ func TestPlayMusicStyle(t *testing.T) {
 		t.Errorf("MS dur: got %.4f want %.4f", (*tones)[2].dur, wantMS)
 	}
 }
+
+func TestPlayStub(t *testing.T) {
+	Play("T120 O4 L4 CDEFGAB") // should not panic
+}
+
+func TestSoundStub(t *testing.T) {
+	Sound(440.0, 18.2) // should not panic
+}

@@ -115,35 +115,66 @@ func (c *Compiler) compileArrayAssignment(s *ast.ArrayAssignment) {
 // ---------------------------------------------------------------------------
 
 func (c *Compiler) compileSubDecl(s *ast.SubDeclaration) {
+	name := strings.ToUpper(s.Name)
 	if s.IsForward {
+		// DECLARE SUB: register as a known function so compileArrayAccess can
+		// distinguish a SUB call from an array element access.
+		c.declaredFuncs[name] = true
 		return
 	}
 	line := s.Pos().Line
 
+	c.declaredFuncs[name] = true
 	skipJump := c.emitJump(OpJmp, line)
-	c.subAddrs[strings.ToUpper(s.Name)] = c.currentAddr()
+	c.subAddrs[name] = c.currentAddr()
+
+	// Bind formal parameters: caller pushes args L-to-R, so TOS holds the
+	// last parameter.  Pop each arg R-to-L and store into its parameter var.
+	for i := len(s.Params) - 1; i >= 0; i-- {
+		paramName := strings.ToUpper(s.Params[i].Name) // Name already includes type suffix (e.g. "msg$" → "MSG$")
+		c.emit(OpStore, c.getVarIndex(paramName), line)
+	}
 
 	for _, stmt := range s.Body {
 		c.compileStatement(stmt)
 	}
+
+	// SUBs have no meaningful return value.  Push a dummy zero so that the
+	// calling LetStatement (CALL foo → LetStatement) can OpStore without
+	// underflowing the stack.
+	c.emit(OpPush, c.addConstant(IntVal(0)), line)
 	c.emit(OpRet, 0, line)
 
 	c.patchJump(skipJump)
 }
 
 func (c *Compiler) compileFunctionDecl(s *ast.FunctionDeclaration) {
+	name := strings.ToUpper(s.Name)
 	if s.IsForward {
+		// DECLARE FUNCTION: register as a known function so compileArrayAccess
+		// recognises Factorial(n) as a call rather than an array element access.
+		c.declaredFuncs[name] = true
 		return
 	}
 	line := s.Pos().Line
 
+	c.declaredFuncs[name] = true
 	skipJump := c.emitJump(OpJmp, line)
-	c.subAddrs[strings.ToUpper(s.Name)] = c.currentAddr()
+	c.subAddrs[name] = c.currentAddr()
+
+	// Bind formal parameters: caller pushes args L-to-R, TOS = last param.
+	// Pop each arg R-to-L into its parameter variable.
+	for i := len(s.Params) - 1; i >= 0; i-- {
+		paramName := strings.ToUpper(s.Params[i].Name) // Name already includes type suffix
+		c.emit(OpStore, c.getVarIndex(paramName), line)
+	}
 
 	for _, stmt := range s.Body {
 		c.compileStatement(stmt)
 	}
 
+	// Load the FUNCTION's return variable (set inside the body via FnAssign or
+	// by assigning to the function name) and leave it on the stack for the caller.
 	funcVarIdx := c.getVarIndex(s.Name)
 	c.emit(OpLoad, funcVarIdx, line)
 	c.emit(OpRet, 0, line)
@@ -200,21 +231,95 @@ func (c *Compiler) compileSwap(s *ast.SwapStatement) {
 
 	id1, ok1 := s.Var1.(*ast.Identifier)
 	id2, ok2 := s.Var2.(*ast.Identifier)
-	if !ok1 || !ok2 {
+
+	// Fast path: both are simple scalar variables.
+	// Stack trick: push both, then store in reverse order — no temp variable needed.
+	if ok1 && ok2 {
+		name1 := id1.Name + id1.TypeSuffix
+		name2 := id2.Name + id2.TypeSuffix
+		idx1 := c.getVarIndex(name1)
+		idx2 := c.getVarIndex(name2)
+		// stack after pushes: [val1, val2]
+		// OpStore idx1 pops val2 → var1 = val2; stack: [val1]
+		// OpStore idx2 pops val1 → var2 = val1; stack: []
+		c.emit(OpLoad, idx1, line)
+		c.emit(OpLoad, idx2, line)
+		c.emit(OpStore, idx1, line)
+		c.emit(OpStore, idx2, line)
+		return
+	}
+
+	// General path: at least one operand is an array element.
+	// Strategy:
+	//   Step 1 — temp = Var1   (load Var1, store to hidden __swaptmp)
+	//   Step 2 — Var1 = Var2   (push Var1 destination indices, load Var2, StoreArray/Store)
+	//   Step 3 — Var2 = temp   (push Var2 destination indices, load __swaptmp, StoreArray/Store)
+	//
+	// For OpStoreArray the stack layout must be [idx1, idx2, …, value] — indices first,
+	// value at TOS.  We achieve this by pushing the destination indices before loading
+	// the source value (OpLoadArray pops the source indices and leaves the value at TOS).
+	aa1, isArr1 := s.Var1.(*ast.ArrayAccess)
+	aa2, isArr2 := s.Var2.(*ast.ArrayAccess)
+	if (!ok1 && !isArr1) || (!ok2 && !isArr2) {
 		c.addError("SWAP requires two variables at line %d", line)
 		return
 	}
 
-	name1 := id1.Name + id1.TypeSuffix
-	name2 := id2.Name + id2.TypeSuffix
-	idx1 := c.getVarIndex(name1)
-	idx2 := c.getVarIndex(name2)
+	tempIdx := c.getVarIndex("__swaptmp")
 
-	// temp = var1; var1 = var2; var2 = temp
-	c.emit(OpLoad, idx1, line)
-	c.emit(OpLoad, idx2, line)
-	c.emit(OpStore, idx1, line)
-	c.emit(OpStore, idx2, line)
+	// Step 1: temp = Var1
+	if ok1 {
+		c.emit(OpLoad, c.getVarIndex(id1.Name+id1.TypeSuffix), line)
+	} else {
+		for _, idx := range aa1.Indices {
+			c.compileExpression(idx)
+		}
+		c.emit(OpLoadArray, c.getVarIndex(aa1.Name+aa1.TypeSuffix), line)
+	}
+	c.emit(OpStore, tempIdx, line)
+
+	// Step 2: Var1 = Var2
+	// Push destination indices for Var1 (if array), then load Var2 value, then store.
+	if isArr1 {
+		nameIdx1 := c.getVarIndex(aa1.Name + aa1.TypeSuffix)
+		for _, idx := range aa1.Indices {
+			c.compileExpression(idx) // destination indices
+		}
+		// Now load Var2 value on top of destination indices.
+		if ok2 {
+			c.emit(OpLoad, c.getVarIndex(id2.Name+id2.TypeSuffix), line)
+		} else {
+			for _, idx := range aa2.Indices {
+				c.compileExpression(idx)
+			}
+			c.emit(OpLoadArray, c.getVarIndex(aa2.Name+aa2.TypeSuffix), line)
+		}
+		c.emit(OpStoreArray, nameIdx1, line)
+	} else {
+		// Var1 is a simple identifier.
+		if ok2 {
+			c.emit(OpLoad, c.getVarIndex(id2.Name+id2.TypeSuffix), line)
+		} else {
+			for _, idx := range aa2.Indices {
+				c.compileExpression(idx)
+			}
+			c.emit(OpLoadArray, c.getVarIndex(aa2.Name+aa2.TypeSuffix), line)
+		}
+		c.emit(OpStore, c.getVarIndex(id1.Name+id1.TypeSuffix), line)
+	}
+
+	// Step 3: Var2 = temp
+	if isArr2 {
+		nameIdx2 := c.getVarIndex(aa2.Name + aa2.TypeSuffix)
+		for _, idx := range aa2.Indices {
+			c.compileExpression(idx)
+		}
+		c.emit(OpLoad, tempIdx, line)
+		c.emit(OpStoreArray, nameIdx2, line)
+	} else {
+		c.emit(OpLoad, tempIdx, line)
+		c.emit(OpStore, c.getVarIndex(id2.Name+id2.TypeSuffix), line)
+	}
 }
 
 // ---------------------------------------------------------------------------

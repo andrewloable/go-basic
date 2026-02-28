@@ -866,3 +866,592 @@ func TestCheckStatementSoundStatement(t *testing.T) {
 		t.Fatalf("expected no errors for SOUND, got: %v", errs)
 	}
 }
+
+// ===========================================================================
+// checkPrintStatement – additional coverage
+// ===========================================================================
+
+func TestCheckPrintStatementNoExpressions(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.PrintStatement{
+				BasePos:     ast.Position{Line: 1, Column: 1},
+				Expressions: []ast.Expression{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for empty PRINT, got: %v", errs)
+	}
+}
+
+func TestCheckPrintStatementWithExpressions(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.PrintStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Expressions: []ast.Expression{
+					&ast.NumberLiteral{Value: 42, NumType: ast.NumInt},
+					&ast.StringLiteral{Value: "hello"},
+				},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for PRINT with mixed expressions, got: %v", errs)
+	}
+}
+
+func TestCheckPrintStatementWithStringFormat(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.PrintStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Expressions: []ast.Expression{
+					&ast.NumberLiteral{Value: 3.14, NumType: ast.NumSingle},
+				},
+				Format: &ast.StringLiteral{BasePos: ast.Position{Line: 1, Column: 10}, Value: "##.##"},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for PRINT USING with string format, got: %v", errs)
+	}
+}
+
+func TestCheckPrintStatementWithNumericFormatError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.PrintStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Expressions: []ast.Expression{
+					&ast.NumberLiteral{Value: 42, NumType: ast.NumInt},
+				},
+				Format: &ast.NumberLiteral{BasePos: ast.Position{Line: 1, Column: 10}, Value: 123, NumType: ast.NumInt},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for PRINT USING with non-string format")
+	}
+	if !strings.Contains(errs[0], "format must be a string") {
+		t.Fatalf("expected format error, got: %s", errs[0])
+	}
+}
+
+// ===========================================================================
+// checkIfStatement – ElseIf clauses
+// ===========================================================================
+
+func TestCheckIfStatementElseIfNumeric(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				ThenBlock: []ast.Statement{},
+				ElseIfClauses: []ast.ElseIfClause{
+					{
+						BasePos:   ast.Position{Line: 2, Column: 1},
+						Condition: &ast.NumberLiteral{Value: 0, NumType: ast.NumInt},
+						Body:      []ast.Statement{},
+					},
+				},
+				ElseBlock: []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for IF with numeric ELSEIF, got: %v", errs)
+	}
+}
+
+func TestCheckIfStatementElseIfStringConditionError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				ThenBlock: []ast.Statement{},
+				ElseIfClauses: []ast.ElseIfClause{
+					{
+						BasePos:   ast.Position{Line: 2, Column: 1},
+						Condition: &ast.StringLiteral{Value: "yes"},
+						Body:      []ast.Statement{},
+					},
+				},
+				ElseBlock: []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for ELSEIF with string condition")
+	}
+	if !strings.Contains(errs[0], "ELSEIF condition must be numeric") {
+		t.Fatalf("expected ELSEIF condition error, got: %s", errs[0])
+	}
+}
+
+func TestCheckIfStatementStringConditionError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.StringLiteral{Value: "bad"},
+				ThenBlock: []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for IF with string condition")
+	}
+}
+
+// ===========================================================================
+// checkForStatement – step and string errors
+// ===========================================================================
+
+func TestCheckForStatementWithNumericStep(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.ForStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Counter: &ast.Identifier{Name: "i"},
+				Start:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				End:     &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+				Step:    &ast.NumberLiteral{Value: 2, NumType: ast.NumInt},
+				Body:    []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for FOR with numeric STEP, got: %v", errs)
+	}
+}
+
+func TestCheckForStatementWithStringStep(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.ForStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Counter: &ast.Identifier{Name: "i"},
+				Start:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				End:     &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+				Step:    &ast.StringLiteral{Value: "bad"},
+				Body:    []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for FOR with string STEP")
+	}
+	if !strings.Contains(errs[0], "FOR STEP value must be numeric") {
+		t.Fatalf("expected STEP error, got: %s", errs[0])
+	}
+}
+
+func TestCheckForStatementStringCounterError(t *testing.T) {
+	// counter name ending with $ → TypeString → error
+	st := buildSymTable(map[string]*Symbol{
+		"I$": {Name: "I$", Type: SymVariable, DataType: TypeString},
+	})
+	tc := NewTypeChecker(st)
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.ForStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Counter: &ast.Identifier{Name: "I$"},
+				Start:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				End:     &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+				Body:    []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for FOR with string counter variable")
+	}
+	if !strings.Contains(errs[0], "FOR counter variable must be numeric") {
+		t.Fatalf("expected counter error, got: %s", errs[0])
+	}
+}
+
+func TestCheckForStatementStringEndError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.ForStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Counter: &ast.Identifier{Name: "i"},
+				Start:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				End:     &ast.StringLiteral{Value: "bad"},
+				Body:    []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for FOR with string end value")
+	}
+}
+
+// ===========================================================================
+// checkSelectCase – IsRange+EndValue
+// ===========================================================================
+
+func TestCheckSelectCaseWithRange(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 5, NumType: ast.NumInt},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{
+							{
+								BasePos:  ast.Position{Line: 2, Column: 1},
+								Value:    &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+								IsRange:  true,
+								EndValue: &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+							},
+						},
+						Body: []ast.Statement{},
+					},
+				},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for CASE 1 TO 10 with numeric test, got: %v", errs)
+	}
+}
+
+func TestCheckSelectCaseRangeTypeMismatch(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	// numeric test, range end is string → mismatch
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 5, NumType: ast.NumInt},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{
+							{
+								BasePos:  ast.Position{Line: 2, Column: 1},
+								Value:    &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+								IsRange:  true,
+								EndValue: &ast.StringLiteral{Value: "bad"},
+							},
+						},
+						Body: []ast.Statement{},
+					},
+				},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected type mismatch error for CASE range with string end value")
+	}
+	if !strings.Contains(errs[0], "CASE TO") {
+		t.Fatalf("expected CASE TO error, got: %s", errs[0])
+	}
+}
+
+func TestCheckSelectCaseElseBlock(t *testing.T) {
+	// SELECT CASE with CASE ELSE block containing invalid assignment
+	st := buildSymTable(map[string]*Symbol{
+		"N%": {Name: "N%", Type: SymVariable, DataType: TypeInteger},
+	})
+	tc2 := NewTypeChecker(st)
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Cases:    []ast.CaseClause{},
+				ElseBlock: []ast.Statement{
+					&ast.LetStatement{
+						BasePos: ast.Position{Line: 2, Column: 1},
+						Name:    &ast.Identifier{Name: "N", TypeSuffix: "%"},
+						Value:   &ast.StringLiteral{Value: "bad"},
+					},
+				},
+			},
+		},
+	}
+	errs := tc2.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected type error in CASE ELSE block")
+	}
+}
+
+// ===========================================================================
+// checkIncrDecr – amount != nil and string amount error
+// ===========================================================================
+
+func TestCheckIncrDecrWithNumericAmount(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IncrStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Variable: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Amount:   &ast.NumberLiteral{Value: 5, NumType: ast.NumInt},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for INCR with numeric amount, got: %v", errs)
+	}
+}
+
+func TestCheckIncrDecrWithStringAmountError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IncrStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Variable: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Amount:   &ast.StringLiteral{Value: "bad"},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for INCR with string amount")
+	}
+	if !strings.Contains(errs[0], "amount must be numeric") {
+		t.Fatalf("expected amount error, got: %s", errs[0])
+	}
+}
+
+func TestCheckDecrWithStringAmountError(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DecrStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Variable: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Amount:   &ast.StringLiteral{Value: "bad"},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) == 0 {
+		t.Fatal("expected error for DECR with string amount")
+	}
+}
+
+func TestCheckDecrWithNumericAmount(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DecrStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				Variable: &ast.NumberLiteral{Value: 5, NumType: ast.NumInt},
+				Amount:   &ast.NumberLiteral{Value: 2, NumType: ast.NumInt},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for DECR with numeric amount, got: %v", errs)
+	}
+}
+
+// ===========================================================================
+// checkExpression nil case
+// ===========================================================================
+
+func TestCheckExpressionNilCase(t *testing.T) {
+	tc := NewTypeChecker(NewSymbolTable())
+	// checkExpression is called via WhileStatement - pass nil condition through DoLoop
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DoLoopStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: nil,
+				Body:      []ast.Statement{},
+			},
+		},
+	}
+	errs := tc.Check(prog)
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for nil condition, got: %v", errs)
+	}
+}
+
+func TestCheckExpressionDirectNil(t *testing.T) {
+	// Call checkExpression directly with nil to hit the nil early-return branch.
+	tc := NewTypeChecker(NewSymbolTable())
+	tc.checkExpression(nil) // should not panic
+}
+
+// ===========================================================================
+// widenType helper tests
+// ===========================================================================
+
+func TestWidenTypeBothUnknown(t *testing.T) {
+	got := widenType(TypeUnknown, TypeUnknown)
+	if got != TypeUnknown {
+		t.Errorf("widenType(Unknown, Unknown): expected Unknown, got %v", got)
+	}
+}
+
+func TestWidenTypeAUnknown(t *testing.T) {
+	got := widenType(TypeUnknown, TypeInteger)
+	if got != TypeInteger {
+		t.Errorf("widenType(Unknown, Integer): expected Integer, got %v", got)
+	}
+}
+
+func TestWidenTypeBUnknown(t *testing.T) {
+	got := widenType(TypeDouble, TypeUnknown)
+	if got != TypeDouble {
+		t.Errorf("widenType(Double, Unknown): expected Double, got %v", got)
+	}
+}
+
+func TestWidenTypeIntegerAndLong(t *testing.T) {
+	got := widenType(TypeInteger, TypeLong)
+	if got != TypeLong {
+		t.Errorf("widenType(Integer, Long): expected Long, got %v", got)
+	}
+}
+
+func TestWidenTypeLongAndInteger(t *testing.T) {
+	got := widenType(TypeLong, TypeInteger)
+	if got != TypeLong {
+		t.Errorf("widenType(Long, Integer): expected Long, got %v", got)
+	}
+}
+
+func TestWidenTypeSingleAndDouble(t *testing.T) {
+	got := widenType(TypeSingle, TypeDouble)
+	if got != TypeDouble {
+		t.Errorf("widenType(Single, Double): expected Double, got %v", got)
+	}
+}
+
+func TestWidenTypeDoubleAndSingle(t *testing.T) {
+	got := widenType(TypeDouble, TypeSingle)
+	if got != TypeDouble {
+		t.Errorf("widenType(Double, Single): expected Double, got %v", got)
+	}
+}
+
+func TestWidenTypeSameSingle(t *testing.T) {
+	got := widenType(TypeSingle, TypeSingle)
+	if got != TypeSingle {
+		t.Errorf("widenType(Single, Single): expected Single, got %v", got)
+	}
+}
+
+// ===========================================================================
+// isAssignmentCompatible helper tests
+// ===========================================================================
+
+func TestIsAssignmentCompatibleStringToNumeric(t *testing.T) {
+	got := isAssignmentCompatible(TypeInteger, TypeString)
+	if got {
+		t.Error("isAssignmentCompatible(Integer, String): expected false")
+	}
+}
+
+func TestIsAssignmentCompatibleNumericToString(t *testing.T) {
+	got := isAssignmentCompatible(TypeString, TypeInteger)
+	if got {
+		t.Error("isAssignmentCompatible(String, Integer): expected false")
+	}
+}
+
+func TestIsAssignmentCompatibleStringToString(t *testing.T) {
+	got := isAssignmentCompatible(TypeString, TypeString)
+	if !got {
+		t.Error("isAssignmentCompatible(String, String): expected true")
+	}
+}
+
+func TestIsAssignmentCompatibleNumericToNumeric(t *testing.T) {
+	got := isAssignmentCompatible(TypeInteger, TypeDouble)
+	if !got {
+		t.Error("isAssignmentCompatible(Integer, Double): expected true")
+	}
+}
+
+func TestIsAssignmentCompatibleUnknownVar(t *testing.T) {
+	got := isAssignmentCompatible(TypeUnknown, TypeString)
+	if !got {
+		t.Error("isAssignmentCompatible(Unknown, String): expected true (unknown → permissive)")
+	}
+}
+
+func TestIsAssignmentCompatibleUnknownExpr(t *testing.T) {
+	got := isAssignmentCompatible(TypeInteger, TypeUnknown)
+	if !got {
+		t.Error("isAssignmentCompatible(Integer, Unknown): expected true (unknown → permissive)")
+	}
+}
+
+// ===========================================================================
+// DataTypeName helper tests
+// ===========================================================================
+
+func TestDataTypeNameInteger(t *testing.T) {
+	if got := DataTypeName(TypeInteger); got != "INTEGER" {
+		t.Errorf("expected INTEGER, got %s", got)
+	}
+}
+
+func TestDataTypeNameLong(t *testing.T) {
+	if got := DataTypeName(TypeLong); got != "LONG" {
+		t.Errorf("expected LONG, got %s", got)
+	}
+}
+
+func TestDataTypeNameSingle(t *testing.T) {
+	if got := DataTypeName(TypeSingle); got != "SINGLE" {
+		t.Errorf("expected SINGLE, got %s", got)
+	}
+}
+
+func TestDataTypeNameDouble(t *testing.T) {
+	if got := DataTypeName(TypeDouble); got != "DOUBLE" {
+		t.Errorf("expected DOUBLE, got %s", got)
+	}
+}
+
+func TestDataTypeNameString(t *testing.T) {
+	if got := DataTypeName(TypeString); got != "STRING" {
+		t.Errorf("expected STRING, got %s", got)
+	}
+}
+
+func TestDataTypeNameUnknown(t *testing.T) {
+	if got := DataTypeName(TypeUnknown); got != "UNKNOWN" {
+		t.Errorf("expected UNKNOWN, got %s", got)
+	}
+}

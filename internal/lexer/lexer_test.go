@@ -362,3 +362,274 @@ func TestNextToken_PositionTracking(t *testing.T) {
 		t.Errorf("LET: expected 2:1, got %d:%d", tok.Line, tok.Column)
 	}
 }
+
+// TestReadNewlineCRLF verifies that a CR+LF sequence produces a single TOKEN_EOL.
+func TestReadNewlineCRLF(t *testing.T) {
+	l := New("\r\n")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_EOL {
+		t.Errorf("CRLF: expected TOKEN_EOL, got %s", TokenName(tok.Type))
+	}
+	tok = l.NextToken()
+	if tok.Type != TOKEN_EOF {
+		t.Errorf("CRLF: expected TOKEN_EOF after EOL, got %s", TokenName(tok.Type))
+	}
+}
+
+// TestReadNewlineCROnly verifies that a lone CR (no following LF) produces TOKEN_EOL.
+func TestReadNewlineCROnly(t *testing.T) {
+	l := New("\r")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_EOL {
+		t.Errorf("CR-only: expected TOKEN_EOL, got %s", TokenName(tok.Type))
+	}
+	tok = l.NextToken()
+	if tok.Type != TOKEN_EOF {
+		t.Errorf("CR-only: expected TOKEN_EOF after EOL, got %s", TokenName(tok.Type))
+	}
+}
+
+// TestReadNewlineCRLF_LineIncrement verifies that line number advances after CRLF.
+func TestReadNewlineCRLF_LineIncrement(t *testing.T) {
+	l := New("A\r\nB")
+	l.NextToken()        // A (identifier)
+	l.NextToken()        // EOL (CRLF)
+	tok := l.NextToken() // B
+	if tok.Line != 2 {
+		t.Errorf("after CRLF: expected line 2, got line %d", tok.Line)
+	}
+}
+
+// TestReadNewlineCR_LineIncrement verifies that line number advances after CR-only.
+func TestReadNewlineCR_LineIncrement(t *testing.T) {
+	l := New("A\rB")
+	l.NextToken()        // A (identifier)
+	l.NextToken()        // EOL (CR)
+	tok := l.NextToken() // B
+	if tok.Line != 2 {
+		t.Errorf("after CR-only: expected line 2, got line %d", tok.Line)
+	}
+}
+
+// TestReadStringEmpty verifies that an empty string literal ("") produces TOKEN_STRING.
+func TestReadStringEmpty(t *testing.T) {
+	l := New(`""`)
+	tok := l.NextToken()
+	if tok.Type != TOKEN_STRING {
+		t.Errorf("empty string: expected TOKEN_STRING, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "" {
+		t.Errorf("empty string: expected empty literal, got %q", tok.Literal)
+	}
+}
+
+// TestReadStringUnterminated verifies that a string with no closing quote produces TOKEN_ILLEGAL.
+func TestReadStringUnterminated(t *testing.T) {
+	l := New(`"hello`)
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("unterminated string: expected TOKEN_ILLEGAL, got %s", TokenName(tok.Type))
+	}
+}
+
+// TestReadStringUnterminated_AtNewline verifies that a string interrupted by newline produces TOKEN_ILLEGAL.
+func TestReadStringUnterminated_AtNewline(t *testing.T) {
+	l := New("\"hello\n")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("newline-terminated string: expected TOKEN_ILLEGAL, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "hello" {
+		t.Errorf("newline-terminated string: expected literal %q, got %q", "hello", tok.Literal)
+	}
+}
+
+// TestReadStringUnterminated_AtCR verifies that a string interrupted by CR produces TOKEN_ILLEGAL.
+func TestReadStringUnterminated_AtCR(t *testing.T) {
+	l := New("\"world\r")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("CR-terminated string: expected TOKEN_ILLEGAL, got %s", TokenName(tok.Type))
+	}
+}
+
+// TestReadNumber_IntegerPercent verifies that '42%' is lexed as TOKEN_INTEGER.
+func TestReadNumber_IntegerPercent(t *testing.T) {
+	l := New("42%")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_INTEGER {
+		t.Errorf("42%%: expected TOKEN_INTEGER, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "42" {
+		t.Errorf("42%%: expected literal %q, got %q", "42", tok.Literal)
+	}
+}
+
+// TestReadNumber_LongAmpersand verifies that '100&' is lexed as TOKEN_LONG.
+func TestReadNumber_LongAmpersand(t *testing.T) {
+	l := New("100&")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_LONG {
+		t.Errorf("100&: expected TOKEN_LONG, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "100" {
+		t.Errorf("100&: expected literal %q, got %q", "100", tok.Literal)
+	}
+}
+
+// TestReadNumber_SingleExclaim verifies that '1.5!' is lexed as TOKEN_SINGLE.
+func TestReadNumber_SingleExclaim(t *testing.T) {
+	l := New("1.5!")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_SINGLE {
+		t.Errorf("1.5!: expected TOKEN_SINGLE, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "1.5" {
+		t.Errorf("1.5!: expected literal %q, got %q", "1.5", tok.Literal)
+	}
+}
+
+// TestReadNumber_DoubleHash verifies that '3.14#' is lexed as TOKEN_DOUBLE.
+func TestReadNumber_DoubleHash(t *testing.T) {
+	l := New("3.14#")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_DOUBLE {
+		t.Errorf("3.14#: expected TOKEN_DOUBLE, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "3.14" {
+		t.Errorf("3.14#: expected literal %q, got %q", "3.14", tok.Literal)
+	}
+}
+
+// TestReadNumber_DoubleExponent verifies that 'D' exponent produces TOKEN_DOUBLE.
+func TestReadNumber_DoubleExponent(t *testing.T) {
+	l := New("1.23D+5")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_DOUBLE {
+		t.Errorf("1.23D+5: expected TOKEN_DOUBLE, got %s", TokenName(tok.Type))
+	}
+}
+
+// TestReadNumber_LeadingDot verifies that '.5' is lexed as TOKEN_SINGLE.
+func TestReadNumber_LeadingDot(t *testing.T) {
+	l := New(".5")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_SINGLE {
+		t.Errorf(".5: expected TOKEN_SINGLE, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != ".5" {
+		t.Errorf(".5: expected literal %q, got %q", ".5", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_HexUppercase verifies &HFF produces TOKEN_HEX with literal "FF".
+func TestReadSpecialRadix_HexUppercase(t *testing.T) {
+	l := New("&HFF")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_HEX {
+		t.Errorf("&HFF: expected TOKEN_HEX, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "FF" {
+		t.Errorf("&HFF: expected literal %q, got %q", "FF", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_HexLowercase verifies &h1a produces TOKEN_HEX with literal "1a".
+func TestReadSpecialRadix_HexLowercase(t *testing.T) {
+	l := New("&h1a")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_HEX {
+		t.Errorf("&h1a: expected TOKEN_HEX, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "1a" {
+		t.Errorf("&h1a: expected literal %q, got %q", "1a", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_OctalUppercase verifies &O77 produces TOKEN_OCTAL with literal "77".
+func TestReadSpecialRadix_OctalUppercase(t *testing.T) {
+	l := New("&O77")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_OCTAL {
+		t.Errorf("&O77: expected TOKEN_OCTAL, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "77" {
+		t.Errorf("&O77: expected literal %q, got %q", "77", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_OctalLowercase verifies &o17 produces TOKEN_OCTAL with literal "17".
+func TestReadSpecialRadix_OctalLowercase(t *testing.T) {
+	l := New("&o17")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_OCTAL {
+		t.Errorf("&o17: expected TOKEN_OCTAL, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "17" {
+		t.Errorf("&o17: expected literal %q, got %q", "17", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_BinaryUppercase verifies &B1010 produces TOKEN_BINARY_LIT.
+func TestReadSpecialRadix_BinaryUppercase(t *testing.T) {
+	l := New("&B1010")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_BINARY_LIT {
+		t.Errorf("&B1010: expected TOKEN_BINARY_LIT, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "1010" {
+		t.Errorf("&B1010: expected literal %q, got %q", "1010", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_BinaryLowercase verifies &b101 produces TOKEN_BINARY_LIT.
+func TestReadSpecialRadix_BinaryLowercase(t *testing.T) {
+	l := New("&b101")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_BINARY_LIT {
+		t.Errorf("&b101: expected TOKEN_BINARY_LIT, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "101" {
+		t.Errorf("&b101: expected literal %q, got %q", "101", tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_HexNoDigits verifies &H with no following hex digits produces TOKEN_ILLEGAL.
+func TestReadSpecialRadix_HexNoDigits(t *testing.T) {
+	l := New("&H ")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("&H (no digits): expected TOKEN_ILLEGAL, got %s (%q)", TokenName(tok.Type), tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_OctalNoDigits verifies &O with no following octal digits produces TOKEN_ILLEGAL.
+func TestReadSpecialRadix_OctalNoDigits(t *testing.T) {
+	l := New("&O ")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("&O (no digits): expected TOKEN_ILLEGAL, got %s (%q)", TokenName(tok.Type), tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_BinaryNoDigits verifies &B with no following binary digits produces TOKEN_ILLEGAL.
+func TestReadSpecialRadix_BinaryNoDigits(t *testing.T) {
+	l := New("&B ")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("&B (no digits): expected TOKEN_ILLEGAL, got %s (%q)", TokenName(tok.Type), tok.Literal)
+	}
+}
+
+// TestReadSpecialRadix_IllegalLiteralContent verifies that when no digits follow
+// the radix letter, the Literal field contains the '&' prefix plus the radix char.
+func TestReadSpecialRadix_IllegalLiteralContent(t *testing.T) {
+	l := New("&H")
+	tok := l.NextToken()
+	if tok.Type != TOKEN_ILLEGAL {
+		t.Errorf("&H (EOF): expected TOKEN_ILLEGAL, got %s", TokenName(tok.Type))
+	}
+	if tok.Literal != "&H" {
+		t.Errorf("&H (EOF): expected literal %q, got %q", "&H", tok.Literal)
+	}
+}

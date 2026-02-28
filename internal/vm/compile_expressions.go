@@ -314,12 +314,34 @@ func (c *Compiler) compileFunctionCall(fc *ast.FunctionCall) {
 func (c *Compiler) compileArrayAccess(aa *ast.ArrayAccess) {
 	line := aa.Pos().Line
 	name := aa.Name + aa.TypeSuffix
-	nameIdx := c.getVarIndex(name)
+	upper := strings.ToUpper(name)
 
+	// The parser emits *ast.ArrayAccess for any identifier-with-parentheses that
+	// it does not recognise as a builtin or FN-prefixed function.  This means
+	// user-defined SUBs and FUNCTIONs (e.g. Factorial(n)) are initially parsed
+	// as array accesses.  Detect this case and compile as a function call instead.
+	_, isKnownFunc := c.subAddrs[upper]
+	if c.declaredFuncs[upper] || isKnownFunc {
+		// Treat as a user-defined function call: push args then OpCall.
+		for _, idx := range aa.Indices {
+			c.compileExpression(idx)
+		}
+		if addr, ok := c.subAddrs[upper]; ok {
+			c.emit(OpCall, int32(addr), line)
+		} else {
+			patchIdx := c.emitJump(OpCall, line)
+			c.subPatches = append(c.subPatches, subPatch{
+				instrIndex: patchIdx,
+				name:       aa.Name,
+			})
+		}
+		return
+	}
+
+	nameIdx := c.getVarIndex(name)
 	for _, idx := range aa.Indices {
 		c.compileExpression(idx)
 	}
-
 	c.emit(OpLoadArray, nameIdx, line)
 }
 

@@ -193,3 +193,54 @@ func TestDelayZero(t *testing.T) {
 func TestDelayNegative(t *testing.T) {
 	Delay(-1)
 }
+
+// ---------------------------------------------------------------------------
+// Fre / Peek / Poke
+// ---------------------------------------------------------------------------
+
+func TestFreReturnsPositive(t *testing.T) {
+	got := Fre(0)
+	if got <= 0 {
+		t.Errorf("Fre(0) = %g, want > 0", got)
+	}
+}
+
+func TestPeekReturnsZero(t *testing.T) {
+	got := Peek(0)
+	if got != 0 {
+		t.Errorf("Peek(0) = %g, want 0", got)
+	}
+}
+
+func TestPokeNoOp(t *testing.T) {
+	// Poke is a documented no-op; verify it does not panic.
+	Poke(0, 255)
+}
+
+// ---------------------------------------------------------------------------
+// Shell
+// ---------------------------------------------------------------------------
+
+func TestShellEmpty(t *testing.T) {
+	// Shell("") should return nil immediately without running any command.
+	err := Shell("")
+	if err != nil {
+		t.Errorf("Shell(\"\") = %v, want nil", err)
+	}
+}
+
+func TestShellEcho(t *testing.T) {
+	// Run a trivial command to exercise the Unix /bin/sh path.
+	err := Shell("true")
+	if err != nil {
+		t.Errorf("Shell(\"true\") = %v, want nil", err)
+	}
+}
+
+func TestShellFail(t *testing.T) {
+	// Run a command that exits non-zero to verify errors propagate.
+	err := Shell("false")
+	if err == nil {
+		t.Error("Shell(\"false\") = nil, want non-nil error")
+	}
+}

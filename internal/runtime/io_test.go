@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -379,4 +380,356 @@ func TestValueToString(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// formatScientific (via PrintUsing with ^^^^ format)
+// ---------------------------------------------------------------------------
+
+func TestFormatScientificZero(t *testing.T) {
+	// absVal == 0 branch
+	got := PrintUsing("#.##^^^^", []interface{}{0.0})
+	if !strings.Contains(got, "E") {
+		t.Errorf("PrintUsing scientific zero = %q, expected E notation", got)
+	}
+}
+
+func TestFormatScientificPositive(t *testing.T) {
+	// Normal positive value with decimal
+	got := PrintUsing("#.##^^^^", []interface{}{1234.5})
+	if !strings.Contains(got, "E") {
+		t.Errorf("PrintUsing scientific = %q, expected E notation", got)
+	}
+}
+
+func TestFormatScientificNegative(t *testing.T) {
+	// negative=true branch
+	got := PrintUsing("#.##^^^^", []interface{}{-1234.5})
+	if !strings.Contains(got, "-") || !strings.Contains(got, "E") {
+		t.Errorf("PrintUsing scientific negative = %q, expected '-' and 'E'", got)
+	}
+}
+
+func TestFormatScientificLeadingPlus(t *testing.T) {
+	// leadingPlus=true, positive value
+	got := PrintUsing("+#.##^^^^", []interface{}{42.0})
+	if !strings.HasPrefix(got, "+") {
+		t.Errorf("PrintUsing scientific leadingPlus positive = %q, expected '+'", got)
+	}
+}
+
+func TestFormatScientificLeadingPlusNegative(t *testing.T) {
+	// leadingPlus=true, negative value
+	got := PrintUsing("+#.##^^^^", []interface{}{-42.0})
+	if !strings.HasPrefix(got, "-") {
+		t.Errorf("PrintUsing scientific leadingPlus negative = %q, expected '-'", got)
+	}
+}
+
+func TestFormatScientificTrailingPlus(t *testing.T) {
+	// trailingPlus=true, positive value
+	got := PrintUsing("#.##^^^^+", []interface{}{42.0})
+	if !strings.HasSuffix(got, "+") {
+		t.Errorf("PrintUsing scientific trailingPlus = %q, expected trailing '+'", got)
+	}
+}
+
+func TestFormatScientificTrailingPlusNegative(t *testing.T) {
+	// trailingPlus=true, negative value
+	got := PrintUsing("#.##^^^^+", []interface{}{-42.0})
+	if !strings.HasSuffix(got, "-") {
+		t.Errorf("PrintUsing scientific trailingPlus negative = %q, expected trailing '-'", got)
+	}
+}
+
+func TestFormatScientificTrailingMinus(t *testing.T) {
+	// trailingMinus=true, negative value
+	got := PrintUsing("#.##^^^^-", []interface{}{-42.0})
+	if !strings.HasSuffix(got, "-") {
+		t.Errorf("PrintUsing scientific trailingMinus negative = %q, expected trailing '-'", got)
+	}
+}
+
+func TestFormatScientificTrailingMinusPositive(t *testing.T) {
+	// trailingMinus=true, positive value → trailing space
+	got := PrintUsing("#.##^^^^-", []interface{}{42.0})
+	if !strings.HasSuffix(got, " ") {
+		t.Errorf("PrintUsing scientific trailingMinus positive = %q, expected trailing ' '", got)
+	}
+}
+
+func TestFormatScientificNoDecimal(t *testing.T) {
+	// hasDecimal=false branch (format "##^^^^" has no '.')
+	got := PrintUsing("##^^^^", []interface{}{1234.0})
+	if !strings.Contains(got, "E") {
+		t.Errorf("PrintUsing scientific noDecimal = %q, expected E notation", got)
+	}
+}
+
+func TestFormatScientificMultiIntDigits(t *testing.T) {
+	// intDigits > 1 branch
+	got := PrintUsing("##.##^^^^", []interface{}{9999.99})
+	if !strings.Contains(got, "E") {
+		t.Errorf("PrintUsing scientific multiIntDigits = %q, expected E notation", got)
+	}
+}
+
+func TestFormatScientificFloatingDollar(t *testing.T) {
+	// floatingDollar branch
+	got := PrintUsing("$#.##^^^^", []interface{}{42.0})
+	if !strings.Contains(got, "$") {
+		t.Errorf("PrintUsing scientific floatingDollar = %q, expected '$'", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// basicToAnsiFg and basicToAnsiBg — all cases
+// ---------------------------------------------------------------------------
+
+func TestBasicToAnsiFgAllCases(t *testing.T) {
+	tests := []struct {
+		color    int
+		wantCode int
+	}{
+		{0, 30}, {1, 34}, {2, 32}, {3, 36}, {4, 31}, {5, 35},
+		{6, 33}, {7, 37}, {8, 90}, {9, 94}, {10, 92}, {11, 96},
+		{12, 91}, {13, 95}, {14, 93}, {15, 97},
+		{99, 37}, // default
+	}
+	for _, tt := range tests {
+		got := basicToAnsiFg(tt.color)
+		if got != tt.wantCode {
+			t.Errorf("basicToAnsiFg(%d) = %d, want %d", tt.color, got, tt.wantCode)
+		}
+	}
+}
+
+func TestBasicToAnsiBgAllCases(t *testing.T) {
+	tests := []struct {
+		color    int
+		wantCode int
+	}{
+		{0, 40}, {1, 44}, {2, 42}, {3, 46}, {4, 41}, {5, 45},
+		{6, 43}, {7, 47}, {8, 100}, {9, 104}, {10, 102}, {11, 106},
+		{12, 101}, {13, 105}, {14, 103}, {15, 107},
+		{99, 40}, // default
+	}
+	for _, tt := range tests {
+		got := basicToAnsiBg(tt.color)
+		if got != tt.wantCode {
+			t.Errorf("basicToAnsiBg(%d) = %d, want %d", tt.color, got, tt.wantCode)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// InputPrompt, NewScanner, InputSplitLine — stdin mocking
+// ---------------------------------------------------------------------------
+
+func TestInputPromptReadsLine(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	w.WriteString("hello world\n")
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close()
+	}()
+
+	got := InputPrompt("")
+	if got != "hello world" {
+		t.Errorf("InputPrompt() = %q, want %q", got, "hello world")
+	}
+}
+
+func TestInputPromptEOF(t *testing.T) {
+	// On EOF, InputPrompt returns whatever was read (possibly empty).
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	w.WriteString("partial")
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close()
+	}()
+
+	got := InputPrompt("Enter: ")
+	if got != "partial" {
+		t.Errorf("InputPrompt EOF = %q, want %q", got, "partial")
+	}
+}
+
+func TestNewScannerReturnsBufioScanner(t *testing.T) {
+	s := NewScanner()
+	if s == nil {
+		t.Fatal("NewScanner() returned nil")
+	}
+}
+
+func TestInputSplitLine(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	w.WriteString("  1, 2 , 3\n")
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close()
+	}()
+
+	parts := InputSplitLine()
+	if len(parts) != 3 {
+		t.Fatalf("InputSplitLine() = %v, want 3 parts", parts)
+	}
+	if parts[0] != "1" || parts[1] != "2" || parts[2] != "3" {
+		t.Errorf("InputSplitLine() = %v, want [1 2 3]", parts)
+	}
+}
+
+func TestPrintUsingEmpty(t *testing.T) {
+	result := PrintUsing("##", []interface{}{})
+	if result != "" {
+		t.Errorf("expected empty string for empty values, got %q", result)
+	}
+}
+
+func TestPrintUsingBasicHash(t *testing.T) {
+	result := PrintUsing("##", []interface{}{float64(42)})
+	if !strings.Contains(result, "42") {
+		t.Errorf("expected '42' in output, got %q", result)
+	}
+}
+
+func TestPrintUsingDecimal(t *testing.T) {
+	result := PrintUsing("##.##", []interface{}{float64(3.14)})
+	if !strings.Contains(result, "3.14") {
+		t.Errorf("expected '3.14' in output, got %q", result)
+	}
+}
+
+func TestPrintUsingStringField_Bang(t *testing.T) {
+	result := PrintUsing("!", []interface{}{"Hello"})
+	if !strings.Contains(result, "H") {
+		t.Errorf("expected 'H' in output, got %q", result)
+	}
+}
+
+func TestPrintUsingStringField_Ampersand(t *testing.T) {
+	result := PrintUsing("&", []interface{}{"Hi"})
+	if !strings.Contains(result, "Hi") {
+		t.Errorf("expected 'Hi' in output, got %q", result)
+	}
+}
+
+func TestPrintUsingLiteralText(t *testing.T) {
+	result := PrintUsing("Item:", []interface{}{})
+	_ = result
+}
+
+func TestPrintUsingUnderscoreEscape(t *testing.T) {
+	result := PrintUsing("_#", []interface{}{float64(5)})
+	if !strings.Contains(result, "#") {
+		t.Errorf("expected literal '#' in output, got %q", result)
+	}
+}
+
+func TestPrintUsingLeadingPlus(t *testing.T) {
+	result := PrintUsing("+##", []interface{}{float64(7)})
+	_ = result
+}
+
+func TestPrintUsingDoubleDoller(t *testing.T) {
+	result := PrintUsing("$$##.##", []interface{}{float64(12.50)})
+	_ = result
+}
+
+func TestPrintUsingAsteriskFill(t *testing.T) {
+	result := PrintUsing("**###", []interface{}{float64(42)})
+	_ = result
+}
+
+func TestPrintUsingScientific(t *testing.T) {
+	result := PrintUsing("##.##^^^^", []interface{}{float64(12345.6)})
+	_ = result
+}
+
+func TestPrintUsingMultipleValues(t *testing.T) {
+	result := PrintUsing("##", []interface{}{float64(1), float64(2), float64(3)})
+	_ = result
+}
+
+func TestPrintUsingTrailingSign(t *testing.T) {
+	result := PrintUsing("##-", []interface{}{float64(-5)})
+	_ = result
+}
+
+func TestPrintUsingAsteriskDollar(t *testing.T) {
+	result := PrintUsing("**$###", []interface{}{float64(99)})
+	_ = result
+}
+
+func TestPrintUsingNoHashNoPattern(t *testing.T) {
+	result := PrintUsing("abc", []interface{}{float64(5)})
+	_ = result
+}
+
+func TestPrintUsingCommaGrouping(t *testing.T) {
+	result := PrintUsing("#,###", []interface{}{float64(1234)})
+	_ = result
+}
+
+func TestFormatNumberZero(t *testing.T) {
+	result := FormatNumber("##.##", 0)
+	_ = result
+}
+
+func TestFormatNumberNegative(t *testing.T) {
+	result := FormatNumber("##.##", -3.14)
+	if !strings.Contains(result, "3.14") {
+		t.Errorf("expected '3.14' in output, got %q", result)
+	}
+}
+
+func TestFormatNumberLarge(t *testing.T) {
+	result := FormatNumber("####", 9999)
+	if !strings.Contains(result, "9999") {
+		t.Errorf("expected '9999' in output, got %q", result)
+	}
+}
+
+func TestFormatStringTruncate(t *testing.T) {
+	result := FormatString("!", "Hello")
+	if result != "H" {
+		t.Errorf("FormatString('!', 'Hello') = %q, want 'H'", result)
+	}
+}
+
+func TestFormatStringFullAmpersand(t *testing.T) {
+	result := FormatString("&", "Hello")
+	if result != "Hello" {
+		t.Errorf("FormatString('&', 'Hello') = %q, want 'Hello'", result)
+	}
+}
+
+func TestFormatStringPadded(t *testing.T) {
+	result := FormatString(`\ \`, "Hi")
+	if len(result) == 0 {
+		t.Error("FormatString with padded format should return non-empty string")
+	}
+}
+
+func TestFormatNumberScientificSmall(t *testing.T) {
+	result := FormatNumber("#.##^^^^", 0.0001234)
+	_ = result
 }

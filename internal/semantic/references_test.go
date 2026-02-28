@@ -387,3 +387,489 @@ func TestReferenceResolverCaseInsensitiveLabel(t *testing.T) {
 		t.Fatalf("expected no errors for case-insensitive label match, got: %v", errs)
 	}
 }
+
+// ===========================================================================
+// collectTargets – nested block recursion
+// ===========================================================================
+
+func TestCollectTargetsSubDeclarationBody(t *testing.T) {
+	// Label inside a SUB body should be collected
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SubDeclaration{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    "MySub",
+				Body: []ast.Statement{
+					&ast.LabelStatement{
+						BasePos: ast.Position{Line: 2, Column: 1},
+						Name:    "innerSubLabel",
+					},
+				},
+			},
+			&ast.GotoStatement{
+				BasePos: ast.Position{Line: 5, Column: 1},
+				Target:  "innerSubLabel",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (label inside SUB body collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsFunctionDeclarationBody(t *testing.T) {
+	// Label inside a FUNCTION body should be collected
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.FunctionDeclaration{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    "MyFunc",
+				Body: []ast.Statement{
+					&ast.LabelStatement{
+						BasePos: ast.Position{Line: 2, Column: 1},
+						Name:    "innerFuncLabel",
+					},
+				},
+			},
+			&ast.GotoStatement{
+				BasePos: ast.Position{Line: 5, Column: 1},
+				Target:  "innerFuncLabel",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (label inside FUNCTION body collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsIfStatementAllBlocks(t *testing.T) {
+	// Labels in ThenBlock, ElseIf body, and ElseBlock should all be collected
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				ThenBlock: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "thenLabel"},
+				},
+				ElseIfClauses: []ast.ElseIfClause{
+					{
+						BasePos:   ast.Position{Line: 3, Column: 1},
+						Condition: &ast.NumberLiteral{Value: 0, NumType: ast.NumInt},
+						Body: []ast.Statement{
+							&ast.LabelStatement{BasePos: ast.Position{Line: 4, Column: 1}, Name: "elseIfLabel"},
+						},
+					},
+				},
+				ElseBlock: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 5, Column: 1}, Name: "elseLabel"},
+				},
+			},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 6, Column: 1}, Target: "thenLabel"},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 7, Column: 1}, Target: "elseIfLabel"},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 8, Column: 1}, Target: "elseLabel"},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (labels in all IF blocks collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsWhileStatementBody(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.WhileStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Body: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "whileLabel"},
+				},
+			},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "whileLabel"},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (label in WHILE body collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsDoLoopStatementBody(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DoLoopStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Body: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "doLabel"},
+				},
+			},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "doLabel"},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (label in DO LOOP body collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsSelectCaseAllBlocks(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{
+							{Value: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt}},
+						},
+						Body: []ast.Statement{
+							&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "caseLabel"},
+						},
+					},
+				},
+				ElseBlock: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 3, Column: 1}, Name: "caseElseLabel"},
+				},
+			},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 4, Column: 1}, Target: "caseLabel"},
+			&ast.GotoStatement{BasePos: ast.Position{Line: 5, Column: 1}, Target: "caseElseLabel"},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors (labels in SELECT CASE blocks collected), got: %v", errs)
+	}
+}
+
+func TestCollectTargetsDataStatement(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.DataStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Values: []ast.Expression{
+					&ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+					&ast.StringLiteral{Value: "hello"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	rr.Resolve()
+	pool := rr.GetDataPool()
+	if len(pool) != 2 {
+		t.Fatalf("expected 2 items in data pool, got %d", len(pool))
+	}
+}
+
+// ===========================================================================
+// validateReferences – nested block recursion
+// ===========================================================================
+
+func TestValidateReferencesOnEventGosubStatement(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "timerHandler"},
+			&ast.OnEventGosubStatement{
+				BasePos:   ast.Position{Line: 2, Column: 1},
+				EventType: "TIMER",
+				Target:    "timerHandler",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for ON TIMER GOSUB with valid target, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesRestoreWithNonEmptyTarget(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "dataSection"},
+			&ast.RestoreStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Target:  "dataSection",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for RESTORE with valid target, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesRestoreMissingTarget(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.RestoreStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Target:  "missing",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) == 0 {
+		t.Fatal("expected error for RESTORE with undefined target")
+	}
+}
+
+func TestValidateReferencesResumeWithNonNextLabel(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "errRecovery"},
+			&ast.ResumeStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Type:    "errRecovery",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for RESUME <label>, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesResumeMissingLabel(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.ResumeStatement{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Type:    "missingLabel",
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) == 0 {
+		t.Fatal("expected error for RESUME with undefined label")
+	}
+}
+
+func TestValidateReferencesSubDeclarationBody(t *testing.T) {
+	// GOTO inside SUB body to a label inside the same SUB
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SubDeclaration{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    "MySub",
+				Body: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "subTarget"},
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "subTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO inside SUB body, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesFunctionDeclarationBody(t *testing.T) {
+	// GOTO inside FUNCTION body to a label inside the same FUNCTION
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.FunctionDeclaration{
+				BasePos: ast.Position{Line: 1, Column: 1},
+				Name:    "MyFunc",
+				Body: []ast.Statement{
+					&ast.LabelStatement{BasePos: ast.Position{Line: 2, Column: 1}, Name: "funcTarget"},
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "funcTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO inside FUNCTION body, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesIfAllBlocks(t *testing.T) {
+	// GOTO in ThenBlock, ElseIfClause, and ElseBlock validated recursively
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "validTarget"},
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 2, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				ThenBlock: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "validTarget"},
+				},
+				ElseIfClauses: []ast.ElseIfClause{
+					{
+						BasePos:   ast.Position{Line: 4, Column: 1},
+						Condition: &ast.NumberLiteral{Value: 0, NumType: ast.NumInt},
+						Body: []ast.Statement{
+							&ast.GotoStatement{BasePos: ast.Position{Line: 5, Column: 1}, Target: "validTarget"},
+						},
+					},
+				},
+				ElseBlock: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 6, Column: 1}, Target: "validTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO in all IF blocks, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesIfBlockMissingLabel(t *testing.T) {
+	// GOTO inside ThenBlock to missing label → error
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.IfStatement{
+				BasePos:   ast.Position{Line: 1, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				ThenBlock: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 2, Column: 1}, Target: "noSuchLabel"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) == 0 {
+		t.Fatal("expected error for GOTO in ThenBlock to missing label")
+	}
+}
+
+func TestValidateReferencesForStatementBody(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "forTarget"},
+			&ast.ForStatement{
+				BasePos: ast.Position{Line: 2, Column: 1},
+				Counter: &ast.Identifier{Name: "i"},
+				Start:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				End:     &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+				Body: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "forTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO in FOR body, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesWhileStatementBody(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "whileTarget"},
+			&ast.WhileStatement{
+				BasePos:   ast.Position{Line: 2, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Body: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "whileTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO in WHILE body, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesDoLoopStatementBody(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "doTarget"},
+			&ast.DoLoopStatement{
+				BasePos:   ast.Position{Line: 2, Column: 1},
+				Condition: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Body: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "doTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO in DO LOOP body, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesSelectCaseAllBlocks(t *testing.T) {
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.LabelStatement{BasePos: ast.Position{Line: 1, Column: 1}, Name: "selectTarget"},
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 2, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{
+							{Value: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt}},
+						},
+						Body: []ast.Statement{
+							&ast.GotoStatement{BasePos: ast.Position{Line: 3, Column: 1}, Target: "selectTarget"},
+						},
+					},
+				},
+				ElseBlock: []ast.Statement{
+					&ast.GotoStatement{BasePos: ast.Position{Line: 4, Column: 1}, Target: "selectTarget"},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors for GOTO in SELECT CASE blocks, got: %v", errs)
+	}
+}
+
+func TestValidateReferencesSelectCaseMissingTarget(t *testing.T) {
+	// GOTO inside a CASE body to a missing label → error
+	prog := &ast.Program{
+		Statements: []ast.Statement{
+			&ast.SelectCaseStatement{
+				BasePos:  ast.Position{Line: 1, Column: 1},
+				TestExpr: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+				Cases: []ast.CaseClause{
+					{
+						Values: []ast.CaseValue{
+							{Value: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt}},
+						},
+						Body: []ast.Statement{
+							&ast.GotoStatement{BasePos: ast.Position{Line: 2, Column: 1}, Target: "noSuchLabel"},
+						},
+					},
+				},
+			},
+		},
+	}
+	rr := NewReferenceResolver(prog)
+	errs := rr.Resolve()
+	if len(errs) == 0 {
+		t.Fatal("expected error for GOTO in CASE body to missing label")
+	}
+}
