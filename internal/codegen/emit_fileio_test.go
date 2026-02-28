@@ -23,7 +23,7 @@ func TestFilePrintStatement(t *testing.T) {
 	if !strings.Contains(out, "fm.FilePrint(") {
 		t.Errorf("expected fm.FilePrint call, got:\n%s", out)
 	}
-	if !strings.Contains(out, "fm := rt.NewFileManager()") {
+	if !strings.Contains(out, "fm = rt.NewFileManager()") {
 		t.Errorf("expected FileManager declaration, got:\n%s", out)
 	}
 }

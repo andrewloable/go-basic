@@ -56,6 +56,13 @@ func (g *CodeGenerator) emitFilePrint(s *ast.FilePrintStatement) {
 	g.needFileManager = true
 	fileNum := g.emitExpr(s.FileNum)
 
+	// PUT$ filenum, data$ — binary file put
+	if s.IsBinaryPut && len(s.Expressions) > 0 {
+		data := g.emitExpr(s.Expressions[0])
+		g.writeLinef("_ = fm.BinaryPutCur(int(%s), string(%s))", fileNum, data)
+		return
+	}
+
 	if len(s.Expressions) == 0 {
 		g.writeLinef("fm.FilePrint(int(%s))", fileNum)
 		return
@@ -71,6 +78,14 @@ func (g *CodeGenerator) emitFilePrint(s *ast.FilePrintStatement) {
 func (g *CodeGenerator) emitFileInput(s *ast.FileInputStatement) {
 	g.needFileManager = true
 	fileNum := g.emitExpr(s.FileNum)
+
+	// GET$ filenum, length, var$ — binary file get
+	if s.IsBinaryGet && len(s.Variables) >= 2 {
+		length := g.emitExpr(s.Variables[0])
+		varName := g.emitExpr(s.Variables[1])
+		g.writeLinef("%s, _ = fm.BinaryGetCur(int(%s), int(%s))", varName, fileNum, length)
+		return
+	}
 
 	for _, v := range s.Variables {
 		varName := g.emitExpr(v)
@@ -133,6 +148,14 @@ func (g *CodeGenerator) emitField(s *ast.FieldStatement) {
 		// Strip the $ suffix from the variable name for the field name
 		fieldName := strings.TrimSuffix(f.VarName, "$")
 		g.writeLinef("{Name: %q, Length: int(%s)},", fieldName, length)
+		// Register the field definition so that after GET, codegen emits
+		// fm.GetFieldValue() calls to populate the local variables.
+		mangledName := mangleName(f.VarName)
+		g.fieldDefs = append(g.fieldDefs, fieldDef{
+			fileNum:   fileNum,
+			fieldName: fieldName,
+			varName:   mangledName,
+		})
 	}
 	g.indent--
 	g.writeLine("})")
@@ -173,6 +196,12 @@ func (g *CodeGenerator) emitGet(s *ast.GetStatement) {
 		rec = g.emitExpr(s.RecordOrPos)
 	}
 	g.writeLinef("fm.RandomGet(int(%s), int(%s))", fileNum, rec)
+	// After GET, populate local variables from the FIELD buffer.
+	for _, fd := range g.fieldDefs {
+		if fd.fileNum == fileNum {
+			g.writeLinef("%s, _ = fm.GetFieldValue(int(%s), %q)", fd.varName, fd.fileNum, fd.fieldName)
+		}
+	}
 }
 
 func (g *CodeGenerator) emitSeek(s *ast.SeekStatement) {

@@ -13,8 +13,12 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	// Hoisted variable declarations (avoids goto-over-declaration errors).
+	var s_str string
+	_ = s_str
+
 	// Test string functions
-	var s_str string = "Hello, World!"
+	s_str = "Hello, World!"
 	fmt.Println("Original: ", s_str)
 	fmt.Println("Length:   ", rt.Len(s_str))
 	fmt.Println("Upper:    ", rt.UCase(s_str))

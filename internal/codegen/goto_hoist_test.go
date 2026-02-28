@@ -63,7 +63,8 @@ func TestGotoOverDeclarationHoisting(t *testing.T) {
 }
 
 func TestNoHoistingWithoutGoto(t *testing.T) {
-	// Program without GOTO should NOT have hoisted declarations.
+	// Variables are always hoisted to the top of main() so that variables
+	// declared inside one loop body remain visible in sibling loops.
 	stmts := []ast.Statement{
 		&ast.LetStatement{
 			Name:  &ast.Identifier{Name: "X"},
@@ -82,13 +83,12 @@ func TestNoHoistingWithoutGoto(t *testing.T) {
 		t.Fatalf("Codegen error: %v", err)
 	}
 
-	// Should NOT have hoisted variables.
-	if strings.Contains(goSrc, "// Hoisted variable declarations") {
-		t.Errorf("Should not have hoisted declarations without GOTO:\n%s", goSrc)
+	// Variable should be declared at top of main() (hoisted) and assigned separately.
+	if !strings.Contains(goSrc, "var X float32") {
+		t.Errorf("Expected var X float32 declaration:\n%s", goSrc)
 	}
-
-	// Should have inline var declaration (mangled name is uppercase X).
-	if !strings.Contains(goSrc, "var X float32 =") {
-		t.Errorf("Expected inline var declaration for X:\n%s", goSrc)
+	// Assignment form (not inline initialization) since the var is pre-declared.
+	if strings.Contains(goSrc, "var X float32 =") {
+		t.Errorf("Expected assignment form (X = ...) not inline init (var X = ...):\n%s", goSrc)
 	}
 }

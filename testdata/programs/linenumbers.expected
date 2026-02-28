@@ -13,9 +13,12 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	// Hoisted variable declarations (avoids goto-over-declaration errors).
+	var I float32
+	_ = I
+
 	// Classic BASIC with line numbers
 	fmt.Println("Line numbered program")
-	var I float32
 	end_0 := float32(5)
 	step_0 := float32(1)
 	for I = float32(1); (step_0 > 0 && I <= end_0) || (step_0 < 0 && I >= end_0) || (step_0 == 0); I += step_0 {

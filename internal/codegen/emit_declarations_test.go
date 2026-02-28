@@ -104,8 +104,8 @@ func TestEmitTypeBlock(t *testing.T) {
 		},
 	}
 	out := generate(t, stmts)
-	if !strings.Contains(out, "MyType") {
-		t.Errorf("expected MyType in output, got:\n%s", out)
+	if !strings.Contains(out, "MYTYPE") {
+		t.Errorf("expected MYTYPE in output, got:\n%s", out)
 	}
 }
 
@@ -245,6 +245,117 @@ func TestSharedVarsPackageLevel(t *testing.T) {
 	subBody := out[subIdx:]
 	if strings.Contains(subBody, "var Name1_str") {
 		t.Errorf("Name1_str should not be declared inside SUB, got:\n%s", subBody)
+	}
+}
+
+// TestSubByRefParam verifies that SUB parameters that are assigned to
+// inside the body get pointer types and by-ref call semantics.
+func TestSubByRefParam(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.SubDeclaration{
+			Name: "Add",
+			Params: []ast.Parameter{
+				{Name: "a"},
+				{Name: "b"},
+				{Name: "result"},
+			},
+			Body: []ast.Statement{
+				&ast.LetStatement{
+					Name: &ast.Identifier{Name: "result"},
+					Value: &ast.BinaryExpr{
+						Left:     &ast.Identifier{Name: "a"},
+						Operator: "+",
+						Right:    &ast.Identifier{Name: "b"},
+					},
+				},
+			},
+		},
+	}
+	out := generate(t, stmts)
+
+	// 'result' is assigned to, so it should be a pointer parameter.
+	if !strings.Contains(out, "*float32") {
+		t.Errorf("expected '*float32' for by-ref param 'result', got:\n%s", out)
+	}
+	// 'a' and 'b' are read-only, should NOT be pointers.
+	if strings.Contains(out, "a *float32") {
+		t.Errorf("'a' should not be a pointer param, got:\n%s", out)
+	}
+	// Inside the body, assignment to 'result' should dereference: *result = ...
+	if !strings.Contains(out, "*result") {
+		t.Errorf("expected '*result = ...' for pointer assignment, got:\n%s", out)
+	}
+	// Reading 'a' inside the body should NOT dereference.
+	if strings.Contains(out, "(*a)") {
+		t.Errorf("'a' should not be dereferenced, got:\n%s", out)
+	}
+}
+
+// TestSubByValParamNotPointer verifies that BYVAL params are never pointers.
+func TestSubByValParamNotPointer(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.SubDeclaration{
+			Name: "Modify",
+			Params: []ast.Parameter{
+				{Name: "x", IsByVal: true},
+			},
+			Body: []ast.Statement{
+				&ast.LetStatement{
+					Name:  &ast.Identifier{Name: "x"},
+					Value: &ast.NumberLiteral{Value: 99, OriginalText: "99"},
+				},
+			},
+		},
+	}
+	out := generate(t, stmts)
+	if strings.Contains(out, "*float32") {
+		t.Errorf("BYVAL param should not be a pointer, got:\n%s", out)
+	}
+}
+
+// TestSubCallByRef verifies that call sites wrap arguments with & for by-ref params.
+func TestSubCallByRef(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "sum"},
+			Value: &ast.NumberLiteral{Value: 0, OriginalText: "0"},
+		},
+		// CALL Add(3, 4, sum) — parsed as LetStatement with FunctionCall RHS
+		&ast.LetStatement{
+			Name: &ast.Identifier{Name: "Add"},
+			Value: &ast.FunctionCall{
+				Name: "Add",
+				Args: []ast.Expression{
+					&ast.NumberLiteral{Value: 3, OriginalText: "3"},
+					&ast.NumberLiteral{Value: 4, OriginalText: "4"},
+					&ast.Identifier{Name: "sum"},
+				},
+			},
+		},
+		&ast.SubDeclaration{
+			Name: "Add",
+			Params: []ast.Parameter{
+				{Name: "a"},
+				{Name: "b"},
+				{Name: "result"},
+			},
+			Body: []ast.Statement{
+				&ast.LetStatement{
+					Name: &ast.Identifier{Name: "result"},
+					Value: &ast.BinaryExpr{
+						Left:     &ast.Identifier{Name: "a"},
+						Operator: "+",
+						Right:    &ast.Identifier{Name: "b"},
+					},
+				},
+			},
+		},
+	}
+	out := generate(t, stmts)
+
+	// The call site should pass &sum for the by-ref 'result' parameter.
+	if !strings.Contains(out, "&sum") {
+		t.Errorf("expected '&sum' at call site for by-ref param, got:\n%s", out)
 	}
 }
 

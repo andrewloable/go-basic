@@ -13,13 +13,16 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	// Hoisted variable declarations (avoids goto-over-declaration errors).
+	var i float32
+	_ = i
+
 	// Test SUB and FUNCTION
 	PrintLine("Testing subroutines")
-	var i float32
 	end_0 := float32(10)
 	step_0 := float32(1)
 	for i = float32(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {
-		fmt.Println(i, "! =", Factorial(i))
+		fmt.Println(i, "! =", Factorial(float32(i)))
 	}
 	PrintLine("Done!")
 	os.Exit(0)
@@ -34,7 +37,7 @@ func Factorial(n float32) float32 {
 	if (n <= 1) {
 		Factorial = float32(1)
 	} else {
-		Factorial = float32((n * Factorial((n - 1))))
+		Factorial = float32((n * Factorial(float32((n - 1)))))
 	}
 	return Factorial
 }

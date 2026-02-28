@@ -43,6 +43,7 @@ func (n *ArrayAssignment) Pos() Position        { return n.BasePos }
 type DimStatement struct {
 	BasePos      Position
 	Declarations []DimDecl
+	IsShared     bool // true when DIM SHARED
 }
 
 func (n *DimStatement) statementNode()      {}
@@ -205,6 +206,7 @@ type Parameter struct {
 	Name    string // parameter name (may include type suffix, e.g. "count%")
 	Type    string // explicit AS-type, e.g. "INTEGER", "STRING"; "" when absent
 	IsByVal bool   // true if BYVAL was specified (pass by value, not by reference)
+	IsArray bool   // true if parameter was declared with () (array reference)
 }
 
 // DefTypeStatement represents DEFINT, DEFLNG, DEFSNG, DEFDBL, DEFSTR.

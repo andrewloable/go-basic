@@ -275,6 +275,12 @@ func Pset(x, y, color float64) {
 	pset(int(x), int(y), byte(color))
 }
 
+// Point returns the color attribute of the pixel at screen coordinates (x, y).
+// In the terminal-based stub implementation, this always returns 0 (background).
+func Point(x, y float64) float64 {
+	return 0
+}
+
 // DrawLine draws a line or box. boxMode is "", "B", or "BF".
 // Named DrawLine to avoid conflict with Go's bufio.Scanner line reading.
 func DrawLine(x1, y1, x2, y2, color float64, boxMode string) {

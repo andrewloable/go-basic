@@ -81,6 +81,7 @@ type FileInputStatement struct {
 	FileNum     Expression
 	Variables   []Expression
 	IsLineInput bool
+	IsBinaryGet bool // true when this came from GET$ (binary read)
 }
 
 func (n *FileInputStatement) statementNode()      {}
@@ -95,6 +96,7 @@ type FilePrintStatement struct {
 	Separators     []string
 	Format         Expression
 	HasTrailingSep bool
+	IsBinaryPut    bool // true when this came from PUT$ (binary write)
 }
 
 func (n *FilePrintStatement) statementNode()      {}

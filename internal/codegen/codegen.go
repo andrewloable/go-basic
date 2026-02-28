@@ -182,6 +182,10 @@ type CodeGenerator struct {
 	hoistedVars []hoistedVar
 	// hoistedSet tracks which mangled names have been added to hoistedVars.
 	hoistedSet map[string]bool
+	// hoistedTypes maps mangled name → Go type for all hoisted variables.
+	// Used by emitLet to cast assignments to the correct type when the symbol
+	// table's type inference doesn't match the DIM/AS declaration type.
+	hoistedTypes map[string]string
 	// hasGoto tracks whether the program contains any GOTO/GOSUB statements.
 	hasGoto bool
 
@@ -203,12 +207,43 @@ type CodeGenerator struct {
 	// onErrorLabel holds the most recently set ON ERROR GOTO target label
 	// (mangled). Used by ERROR statement codegen to emit a goto.
 	onErrorLabel string
+
+	// onErrorTargets tracks labels that are only targeted by ON ERROR GOTO.
+	// These labels need a synthetic "if false { goto label }" guard emitted
+	// before the label definition so Go doesn't report "label defined and not used".
+	onErrorTargets map[string]bool
+
+	// subFuncNames holds the upper-cased names of all SUB and FUNCTION
+	// declarations in the program.  Used by collectMainVariables to skip
+	// hoisting variables whose name shadows a SUB/FUNCTION name.
+	subFuncNames map[string]bool
+
+	// constNames tracks mangled names of CONST declarations. Used to
+	// emit them at package level and skip them during main() body emission.
+	constNames map[string]bool
+
+	// fieldDefs tracks FIELD definitions per file number expression.
+	// After a GET statement, codegen emits fm.GetFieldValue() calls to
+	// populate the local variables from the file buffer.
+	fieldDefs []fieldDef
+
+	// paramsByRef maps mangled parameter names to true when the parameter
+	// should be passed by reference (pointer) because it is assigned to
+	// inside the SUB/FUNCTION body and not marked BYVAL.
+	paramsByRef map[string]bool
 }
 
 // hoistedVar represents a variable declaration to be hoisted to the top of main().
 type hoistedVar struct {
 	name string // mangled Go name
 	typ  string // Go type (e.g. "float32", "string")
+}
+
+// fieldDef records a FIELD variable mapping for post-GET buffer reads.
+type fieldDef struct {
+	fileNum   string // emitted file number expression (e.g. "1")
+	fieldName string // BASIC field name (e.g. "Rone")
+	varName   string // mangled Go variable name (e.g. "Rone_str")
 }
 
 // New creates a fresh CodeGenerator ready for use.
@@ -220,9 +255,14 @@ func New() *CodeGenerator {
 		referencedLabels: make(map[string]bool),
 		gosubFuncs:       make(map[string]bool),
 		hoistedSet:       make(map[string]bool),
+		hoistedTypes:     make(map[string]string),
 		sharedVars:       make(map[string]bool),
 		packageVarSet:    make(map[string]bool),
 		arrayDims:        make(map[string]int),
+		onErrorTargets:   make(map[string]bool),
+		subFuncNames:     make(map[string]bool),
+		constNames:       make(map[string]bool),
+		paramsByRef:      make(map[string]bool),
 	}
 }
 
@@ -269,6 +309,39 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	// These will be emitted as package-level var declarations.
 	g.collectSharedVars(program.Statements)
 
+	// Pre-pass: collect all SUB/FUNCTION names so collectMainVariables can
+	// skip hoisting variables that shadow SUB/FUNCTION names.
+	for _, stmt := range program.Statements {
+		switch s := stmt.(type) {
+		case *ast.SubDeclaration:
+			g.subFuncNames[strings.ToUpper(s.Name)] = true
+		case *ast.FunctionDeclaration:
+			g.subFuncNames[strings.ToUpper(s.Name)] = true
+			// Also add without type suffix (e.g., "CalcDelay!" → "CALCDELAY")
+			// so collectMainVariables can match identifiers that lack the suffix.
+			if len(s.Name) > 0 {
+				if last := s.Name[len(s.Name)-1]; last == '%' || last == '$' || last == '!' || last == '#' || last == '&' {
+					g.subFuncNames[strings.ToUpper(s.Name[:len(s.Name)-1])] = true
+				}
+			}
+		case *ast.DefFnDeclaration:
+			g.subFuncNames[strings.ToUpper(s.Name)] = true
+			// Also add without type suffix (e.g., "FNFactorial#" → "FNFACTORIAL")
+			// so collectMainVariables can match LetStatement names that store
+			// the suffix separately in Name.TypeSuffix.
+			base := s.Name
+			if len(base) > 0 {
+				if last := base[len(base)-1]; last == '%' || last == '$' || last == '!' || last == '#' || last == '&' {
+					g.subFuncNames[strings.ToUpper(base[:len(base)-1])] = true
+				}
+			}
+		}
+	}
+
+	// Pre-pass: collect top-level CONST statements and DIM SHARED variables.
+	// These are accessible from SUB/FUNCTION bodies, so they must be package-level.
+	g.collectConstants(program.Statements)
+
 	// Pre-populate declared map for shared/package-level variables so they
 	// are not re-declared inside main().
 	for _, pv := range g.packageVars {
@@ -278,24 +351,22 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	// Check if the program uses any GOTO/GOSUB statements.
 	g.hasGoto = len(g.referencedLabels) > 0
 
-	// If GOTOs exist, collect all main-level variables for hoisting to avoid
-	// goto-over-declaration errors in Go.
-	if g.hasGoto {
-		// Only collect from main-level statements (skip SUB/FUNCTION).
-		mainStmts := make([]ast.Statement, 0, len(program.Statements))
-		for _, stmt := range program.Statements {
-			switch stmt.(type) {
-			case *ast.SubDeclaration, *ast.FunctionDeclaration:
-				continue
-			}
-			mainStmts = append(mainStmts, stmt)
+	// Always hoist main-level variables to the top of main() so that:
+	//   1. No goto can jump over a variable declaration (goto-over-declaration error).
+	//   2. Variables declared inside one loop body are visible in sibling loops.
+	mainStmts := make([]ast.Statement, 0, len(program.Statements))
+	for _, stmt := range program.Statements {
+		switch stmt.(type) {
+		case *ast.SubDeclaration, *ast.FunctionDeclaration:
+			continue
 		}
-		g.collectMainVariables(mainStmts)
+		mainStmts = append(mainStmts, stmt)
+	}
+	g.collectMainVariables(mainStmts)
 
-		// Pre-populate declared map so emitLet/emitFor/etc. use assignment form.
-		for _, hv := range g.hoistedVars {
-			g.declared[hv.name] = true
-		}
+	// Pre-populate declared map so emitLet/emitFor/etc. use assignment form.
+	for _, hv := range g.hoistedVars {
+		g.declared[hv.name] = true
 	}
 
 	// ---- Emit main body into g.buf ----
@@ -360,29 +431,31 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	if len(g.packageVars) > 0 {
 		out.WriteString("// Package-level variables (SHARED across SUBs).\n")
 		for _, pv := range g.packageVars {
-			out.WriteString(fmt.Sprintf("var %s %s\n", pv.name, pv.typ))
+			fmt.Fprintf(&out, "var %s %s\n", pv.name, pv.typ)
 		}
+		out.WriteString("\n")
+	}
+
+	// Declare rng, errState, fm at package level so they are accessible
+	// from SUB/FUNCTION/DEF FN bodies as well as main().
+	if g.needRng {
+		out.WriteString("var rng = rt.NewRNG()\n")
+	}
+	if g.needErrState {
+		out.WriteString("var errState = rt.NewErrorState()\n")
+	}
+	if g.needFileManager {
+		out.WriteString("var fm = rt.NewFileManager()\n")
+	}
+	if g.needRng || g.needErrState || g.needFileManager {
 		out.WriteString("\n")
 	}
 
 	// main function.
 	out.WriteString("func main() {\n")
 
-	// Declare rng if needed.
-	if g.needRng {
-		out.WriteString("\trng := rt.NewRNG()\n")
-		out.WriteString("\t_ = rng\n")
-	}
-
-	// Declare errState if needed (for ERR / ERL builtins).
-	if g.needErrState {
-		out.WriteString("\terrState := rt.NewErrorState()\n")
-		out.WriteString("\t_ = errState\n")
-	}
-
-	// Declare FileManager if needed (for OPEN/CLOSE file I/O).
+	// Close all files at program exit.
 	if g.needFileManager {
-		out.WriteString("\tfm := rt.NewFileManager()\n")
 		out.WriteString("\tdefer fm.FileCloseAll()\n")
 	}
 
@@ -399,7 +472,11 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	if len(g.hoistedVars) > 0 {
 		out.WriteString("\t// Hoisted variable declarations (avoids goto-over-declaration errors).\n")
 		for _, hv := range g.hoistedVars {
-			out.WriteString(fmt.Sprintf("\tvar %s %s\n", hv.name, hv.typ))
+			fmt.Fprintf(&out, "\tvar %s %s\n", hv.name, hv.typ)
+		}
+		// Suppress unused variable errors for hoisted variables.
+		for _, hv := range g.hoistedVars {
+			fmt.Fprintf(&out, "\t_ = %s\n", hv.name)
 		}
 		out.WriteString("\n")
 	}
@@ -449,7 +526,9 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			g.referencedLabels[strings.ToUpper(s.Target)] = true
 		case *ast.OnErrorGotoStatement:
 			if s.Target != "0" && s.Target != "" {
-				g.referencedLabels[strings.ToUpper(s.Target)] = true
+				key := strings.ToUpper(s.Target)
+				g.referencedLabels[key] = true  // keep: ensures the label is emitted
+				g.onErrorTargets[key] = true     // track as ON ERROR target for guard emission
 			}
 		case *ast.ResumeStatement:
 			if s.Type != "" && s.Type != "NEXT" {
@@ -503,9 +582,27 @@ func (g *CodeGenerator) collectMainVariables(stmts []ast.Statement) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.LetStatement:
+			// Skip hoisting if the variable name matches a SUB/FUNCTION name.
+			// Such LetStatements are actually CALL-style invocations parsed as
+			// assignments; hoisting them as int16 vars would shadow the function.
+			if g.subFuncNames[strings.ToUpper(s.Name.Name)] {
+				// But still hoist any identifier arguments in the call.
+				if fc, ok := s.Value.(*ast.FunctionCall); ok {
+					for _, arg := range fc.Args {
+						if ident, ok := arg.(*ast.Identifier); ok {
+							argName := mangleName(ident.Name + ident.TypeSuffix)
+							argT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+							g.addHoistedVar(argName, argT)
+						}
+					}
+				}
+				break
+			}
 			name := mangleName(s.Name.Name + s.Name.TypeSuffix)
 			goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
 			g.addHoistedVar(name, goT)
+			// Also scan RHS expression for implicit variable references.
+			g.collectExprVars(s.Value)
 
 		case *ast.ForStatement:
 			counter := mangleName(s.Counter.Name + s.Counter.TypeSuffix)
@@ -537,8 +634,24 @@ func (g *CodeGenerator) collectMainVariables(stmts []ast.Statement) {
 				}
 			}
 
-		// Recurse into nested blocks (but not SUB/FUNCTION — those are top-level).
+		case *ast.FileInputStatement:
+			for _, v := range s.Variables {
+				if ident, ok := v.(*ast.Identifier); ok {
+					name := mangleName(ident.Name + ident.TypeSuffix)
+					goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+					g.addHoistedVar(name, goT)
+				}
+			}
+
+		case *ast.FieldStatement:
+			for _, f := range s.Fields {
+				name := mangleName(f.VarName)
+				goT := g.goTypeForIdent(f.VarName)
+				g.addHoistedVar(name, goT)
+			}
+
 		case *ast.IfStatement:
+			g.collectExprVars(s.Condition)
 			g.collectMainVariables(s.ThenBlock)
 			for _, clause := range s.ElseIfClauses {
 				g.collectMainVariables(clause.Body)
@@ -552,9 +665,55 @@ func (g *CodeGenerator) collectMainVariables(stmts []ast.Statement) {
 			for _, c := range s.Cases {
 				g.collectMainVariables(c.Body)
 			}
-		case *ast.DefFnDeclaration:
-			g.collectMainVariables(s.Body)
+			// DefFnDeclaration: do NOT recurse — the body's "FNName = expr" assignment
+		// is scoped to the generated Go function, not to main(). Recursing would
+		// hoist "FNName" as a float variable and shadow the function.
 		}
+	}
+}
+
+// collectExprVars walks an expression tree and hoists any identifiers found.
+// This handles the case where variables are used only in RHS expressions
+// (never assigned to) — BASIC implicitly creates them with their zero value.
+func (g *CodeGenerator) collectExprVars(expr ast.Expression) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		upper := strings.ToUpper(e.Name + e.TypeSuffix)
+		if g.subFuncNames[upper] {
+			return
+		}
+		// Skip known builtins
+		switch strings.ToUpper(e.Name + e.TypeSuffix) {
+		case "RND", "TIMER", "INKEY$", "DATE$", "TIME$", "ERR", "ERL", "ERADR":
+			return
+		}
+		name := mangleName(e.Name + e.TypeSuffix)
+		goT := g.goTypeForIdent(e.Name + e.TypeSuffix)
+		g.addHoistedVar(name, goT)
+	case *ast.BinaryExpr:
+		g.collectExprVars(e.Left)
+		g.collectExprVars(e.Right)
+	case *ast.UnaryExpr:
+		g.collectExprVars(e.Operand)
+	case *ast.GroupExpr:
+		g.collectExprVars(e.Inner)
+	case *ast.FunctionCall:
+		for _, arg := range e.Args {
+			g.collectExprVars(arg)
+		}
+	case *ast.ArrayAccess:
+		for _, idx := range e.Indices {
+			g.collectExprVars(idx)
+		}
+	case *ast.FnCallExpression:
+		for _, arg := range e.Args {
+			g.collectExprVars(arg)
+		}
+	case *ast.FieldAccessExpression:
+		g.collectExprVars(e.Object)
 	}
 }
 
@@ -591,12 +750,133 @@ func (g *CodeGenerator) collectSharedFromBody(body []ast.Statement) {
 	}
 }
 
+// collectConstants walks top-level statements and promotes any CONST
+// declarations and DIM SHARED variables to package-level variables so
+// they are accessible from SUB/FUNCTION bodies.
+func (g *CodeGenerator) collectConstants(stmts []ast.Statement) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.ConstStatement:
+			name := mangleName(s.Name)
+			g.constNames[name] = true
+			goT := g.goTypeForIdent(s.Name)
+			g.addPackageVar(name, goT)
+		case *ast.DimStatement:
+			if s.IsShared {
+				for _, d := range s.Declarations {
+					name := mangleName(d.Name + d.TypeSuffix)
+					goT := g.goTypeForDecl(d)
+					if len(d.Dimensions) > 0 {
+						slicePrefix := strings.Repeat("[]", len(d.Dimensions))
+						g.addPackageVar(name, slicePrefix+goT)
+					} else {
+						g.addPackageVar(name, goT)
+					}
+				}
+			}
+		}
+	}
+}
+
 // addPackageVar records a variable for package-level emission, avoiding duplicates.
 func (g *CodeGenerator) addPackageVar(name, goType string) {
 	if !g.packageVarSet[name] {
 		g.packageVarSet[name] = true
 		g.packageVars = append(g.packageVars, hoistedVar{name: name, typ: goType})
 		g.sharedVars[name] = true
+	}
+}
+
+// findAssignedParams scans a SUB/FUNCTION body for parameters that are
+// assigned to (via LetStatement or ArrayAssignment). Only non-BYVAL params
+// that are written to need pointer semantics. Returns a set of mangled
+// parameter names that should use by-reference (pointer) passing.
+func (g *CodeGenerator) findAssignedParams(body []ast.Statement, params []ast.Parameter) map[string]bool {
+	// Build a set of non-BYVAL param mangled names for quick lookup.
+	paramNames := make(map[string]bool, len(params))
+	for _, p := range params {
+		if p.IsByVal || p.IsArray {
+			continue
+		}
+		paramNames[mangleName(p.Name)] = true
+	}
+	if len(paramNames) == 0 {
+		return nil
+	}
+	assigned := make(map[string]bool)
+	g.scanAssignedParams(body, paramNames, assigned)
+	return assigned
+}
+
+// scanAssignedParams recursively scans statements for assignments to
+// parameter names, populating the assigned set.
+func (g *CodeGenerator) scanAssignedParams(stmts []ast.Statement, paramNames, assigned map[string]bool) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetStatement:
+			name := mangleName(s.Name.Name + s.Name.TypeSuffix)
+			if paramNames[name] {
+				assigned[name] = true
+			}
+		case *ast.ArrayAssignment:
+			name := mangleName(s.Array.Name + s.Array.TypeSuffix)
+			if paramNames[name] {
+				assigned[name] = true
+			}
+		case *ast.IncrStatement:
+			if id, ok := s.Variable.(*ast.Identifier); ok {
+				name := mangleName(id.Name + id.TypeSuffix)
+				if paramNames[name] {
+					assigned[name] = true
+				}
+			}
+		case *ast.DecrStatement:
+			if id, ok := s.Variable.(*ast.Identifier); ok {
+				name := mangleName(id.Name + id.TypeSuffix)
+				if paramNames[name] {
+					assigned[name] = true
+				}
+			}
+		case *ast.SwapStatement:
+			if id, ok := s.Var1.(*ast.Identifier); ok {
+				name := mangleName(id.Name + id.TypeSuffix)
+				if paramNames[name] {
+					assigned[name] = true
+				}
+			}
+			if id, ok := s.Var2.(*ast.Identifier); ok {
+				name := mangleName(id.Name + id.TypeSuffix)
+				if paramNames[name] {
+					assigned[name] = true
+				}
+			}
+		case *ast.ReadStatement:
+			for _, v := range s.Variables {
+				if id, ok := v.(*ast.Identifier); ok {
+					name := mangleName(id.Name + id.TypeSuffix)
+					if paramNames[name] {
+						assigned[name] = true
+					}
+				}
+			}
+		// Recurse into nested blocks.
+		case *ast.IfStatement:
+			g.scanAssignedParams(s.ThenBlock, paramNames, assigned)
+			for _, clause := range s.ElseIfClauses {
+				g.scanAssignedParams(clause.Body, paramNames, assigned)
+			}
+			g.scanAssignedParams(s.ElseBlock, paramNames, assigned)
+		case *ast.ForStatement:
+			g.scanAssignedParams(s.Body, paramNames, assigned)
+		case *ast.WhileStatement:
+			g.scanAssignedParams(s.Body, paramNames, assigned)
+		case *ast.DoLoopStatement:
+			g.scanAssignedParams(s.Body, paramNames, assigned)
+		case *ast.SelectCaseStatement:
+			for _, c := range s.Cases {
+				g.scanAssignedParams(c.Body, paramNames, assigned)
+			}
+		}
 	}
 }
 
@@ -609,6 +889,10 @@ func (g *CodeGenerator) addHoistedVar(name, goType string) {
 	if !g.hoistedSet[name] {
 		g.hoistedSet[name] = true
 		g.hoistedVars = append(g.hoistedVars, hoistedVar{name: name, typ: goType})
+		// Record type on first registration only — DIM (with explicit AS type)
+		// appears before LET in source order and its type should win over the
+		// suffix-based inference used for bare variable names.
+		g.hoistedTypes[name] = goType
 	}
 }
 
@@ -628,7 +912,7 @@ func (g *CodeGenerator) writeLine(s string) {
 	g.buf.WriteByte('\n')
 }
 
-func (g *CodeGenerator) writeLinef(format string, args ...interface{}) {
+func (g *CodeGenerator) writeLinef(format string, args ...any) {
 	g.writeIndent()
 	fmt.Fprintf(&g.buf, format, args...)
 	g.buf.WriteByte('\n')
@@ -636,7 +920,7 @@ func (g *CodeGenerator) writeLinef(format string, args ...interface{}) {
 
 // funcWriteIndent writes indentation into funcBuf.
 func (g *CodeGenerator) funcWriteIndent(indent int) {
-	for i := 0; i < indent; i++ {
+	for range indent {
 		g.funcBuf.WriteByte('\t')
 	}
 }
@@ -647,7 +931,7 @@ func (g *CodeGenerator) funcWriteLine(indent int, s string) {
 	g.funcBuf.WriteByte('\n')
 }
 
-func (g *CodeGenerator) funcWriteLinef(indent int, format string, args ...interface{}) {
+func (g *CodeGenerator) funcWriteLinef(indent int, format string, args ...any) {
 	g.funcWriteIndent(indent)
 	fmt.Fprintf(&g.funcBuf, format, args...)
 	g.funcBuf.WriteByte('\n')

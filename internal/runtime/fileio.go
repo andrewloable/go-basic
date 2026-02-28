@@ -586,6 +586,36 @@ func (fm *FileManager) BinaryPut(num int, pos int64, data []byte) error {
 	return err
 }
 
+// BinaryGetCur reads size bytes from the current file position in a binary file.
+func (fm *FileManager) BinaryGetCur(num int, size int) (string, error) {
+	bf, err := fm.getFile(num)
+	if err != nil {
+		return "", err
+	}
+	if bf.Mode != FileModeBinary {
+		return "", fmt.Errorf("file #%d not open for binary access", num)
+	}
+	buf := make([]byte, size)
+	n, err := io.ReadFull(bf.Handle, buf)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
+
+// BinaryPutCur writes a string at the current file position in a binary file.
+func (fm *FileManager) BinaryPutCur(num int, data string) error {
+	bf, err := fm.getFile(num)
+	if err != nil {
+		return err
+	}
+	if bf.Mode != FileModeBinary {
+		return fmt.Errorf("file #%d not open for binary access", num)
+	}
+	_, err = bf.Handle.Write([]byte(data))
+	return err
+}
+
 // --- File Status Functions ---
 
 // Eof returns true if end-of-file has been reached for the given file number.

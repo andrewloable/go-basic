@@ -287,25 +287,56 @@ func (g *CodeGenerator) emitSubDecl(s *ast.SubDeclaration) {
 		return
 	}
 	name := mangleName(s.Name)
-	params := g.emitParams(s.Params)
+	// Detect which parameters are assigned to in the body (need by-ref).
+	byRef := g.findAssignedParams(s.Body, s.Params)
+	params := g.emitParams(s.Params, byRef)
 	g.funcWriteLinef(0, "func %s(%s) {", name, params)
 	// Save and restore state — including the declared map so SUBs get their own scope.
 	origBuf := g.buf
 	origIndent := g.indent
 	origDeclared := g.declared
 	origInSub := g.inSubOrFunc
+	origParamsByRef := g.paramsByRef
 	g.buf = bytes.Buffer{}
 	g.indent = 1
 	g.inSubOrFunc = true
+	g.paramsByRef = byRef
 	// Fresh declared map for the SUB scope. Pre-populate with:
 	// - shared/package-level variables (already declared at package level)
 	// - parameters
+	origHoistedVars := g.hoistedVars
+	origHoistedSet := g.hoistedSet
+	origHoistedTypes := g.hoistedTypes
 	g.declared = make(map[string]bool)
+	g.hoistedVars = nil
+	g.hoistedSet = make(map[string]bool)
+	g.hoistedTypes = make(map[string]string)
 	for k := range g.sharedVars {
 		g.declared[k] = true
+		g.hoistedSet[k] = true
+	}
+	for k := range g.packageVarSet {
+		g.declared[k] = true
+		g.hoistedSet[k] = true
 	}
 	for _, p := range s.Params {
-		g.declared[mangleName(p.Name)] = true
+		pn := mangleName(p.Name)
+		g.declared[pn] = true
+		g.hoistedSet[pn] = true
+	}
+	// Hoist variables used in the SUB body to the top of the function.
+	g.collectMainVariables(s.Body)
+	for _, hv := range g.hoistedVars {
+		g.declared[hv.name] = true
+	}
+	if len(g.hoistedVars) > 0 {
+		for _, hv := range g.hoistedVars {
+			g.writeLinef("var %s %s", hv.name, hv.typ)
+		}
+		// Suppress unused variable errors for hoisted variables.
+		for _, hv := range g.hoistedVars {
+			g.writeLinef("_ = %s", hv.name)
+		}
 	}
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
@@ -314,7 +345,11 @@ func (g *CodeGenerator) emitSubDecl(s *ast.SubDeclaration) {
 	g.buf = origBuf
 	g.indent = origIndent
 	g.declared = origDeclared
+	g.hoistedVars = origHoistedVars
+	g.hoistedSet = origHoistedSet
+	g.hoistedTypes = origHoistedTypes
 	g.inSubOrFunc = origInSub
+	g.paramsByRef = origParamsByRef
 	g.funcWriteLine(0, "}")
 	g.funcWriteLine(0, "")
 }
@@ -324,7 +359,9 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 		return
 	}
 	name := mangleName(s.Name)
-	params := g.emitParams(s.Params)
+	// Detect which parameters are assigned to in the body (need by-ref).
+	byRef := g.findAssignedParams(s.Body, s.Params)
+	params := g.emitParams(s.Params, byRef)
 	retType := g.goTypeForReturnType(s.ReturnType, s.Name)
 	retVar := mangleName(s.Name)
 
@@ -336,21 +373,51 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 	origIndent := g.indent
 	origDeclared := g.declared
 	origInSub := g.inSubOrFunc
+	origParamsByRef := g.paramsByRef
 	g.buf = bytes.Buffer{}
 	g.indent = 1
 	g.inSubOrFunc = true
+	g.paramsByRef = byRef
 	// Fresh declared map for the FUNCTION scope. Pre-populate with:
 	// - shared/package-level variables (already declared at package level)
 	// - parameters
 	// - the return variable (just declared above)
+	origHoistedVars := g.hoistedVars
+	origHoistedSet := g.hoistedSet
+	origHoistedTypes := g.hoistedTypes
 	g.declared = make(map[string]bool)
+	g.hoistedVars = nil
+	g.hoistedSet = make(map[string]bool)
+	g.hoistedTypes = make(map[string]string)
 	for k := range g.sharedVars {
 		g.declared[k] = true
+		g.hoistedSet[k] = true
+	}
+	for k := range g.packageVarSet {
+		g.declared[k] = true
+		g.hoistedSet[k] = true
 	}
 	for _, p := range s.Params {
-		g.declared[mangleName(p.Name)] = true
+		pn := mangleName(p.Name)
+		g.declared[pn] = true
+		g.hoistedSet[pn] = true
 	}
 	g.declared[retVar] = true
+	g.hoistedSet[retVar] = true
+	// Hoist variables used in the FUNCTION body to the top of the function.
+	g.collectMainVariables(s.Body)
+	for _, hv := range g.hoistedVars {
+		g.declared[hv.name] = true
+	}
+	if len(g.hoistedVars) > 0 {
+		for _, hv := range g.hoistedVars {
+			g.writeLinef("var %s %s", hv.name, hv.typ)
+		}
+		// Suppress unused variable errors for hoisted variables.
+		for _, hv := range g.hoistedVars {
+			g.writeLinef("_ = %s", hv.name)
+		}
+	}
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
 	}
@@ -358,7 +425,11 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 	g.buf = origBuf
 	g.indent = origIndent
 	g.declared = origDeclared
+	g.hoistedVars = origHoistedVars
+	g.hoistedSet = origHoistedSet
+	g.hoistedTypes = origHoistedTypes
 	g.inSubOrFunc = origInSub
+	g.paramsByRef = origParamsByRef
 
 	g.funcWriteLinef(1, "return %s", retVar)
 	g.funcWriteLine(0, "}")
@@ -366,8 +437,25 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 }
 
 func (g *CodeGenerator) emitDefFn(s *ast.DefFnDeclaration) {
-	name := mangleName(s.Name)
-	params := g.emitParams(s.Params)
+	// When the source used the two-token form "DEF FN name(params)" (with a
+	// space), the parser stores just "name" in s.Name.  The call-site emitter
+	// (emitFnCallExpression) adds an "fn_" prefix so that the call becomes
+	// fn_name(...).  We must use the same prefix in the definition so the
+	// symbols match.
+	//
+	// When the source used the one-token form "DEF FNname(params)" (no space),
+	// the parser stores "FNname" in s.Name.  FunctionCall (not FnCallExpression)
+	// is used at the call site and emits mangleName("FNname") = "FNname", so
+	// no prefix is needed.
+	var name string
+	if strings.HasPrefix(strings.ToUpper(s.Name), "FN") {
+		// One-token form: FNfoo → function is called as FNfoo(...)
+		name = mangleName(s.Name)
+	} else {
+		// Two-token form: FN foo → function is called as fn_foo(...)
+		name = "fn_" + mangleName(s.Name)
+	}
+	params := g.emitParams(s.Params, nil)
 	retType := g.goTypeForIdent(s.Name)
 
 	if s.SingleLineExpr != nil {
@@ -384,11 +472,40 @@ func (g *CodeGenerator) emitDefFn(s *ast.DefFnDeclaration) {
 		origInDefFn := g.inDefFn
 		origDefFnReturnType := g.defFnReturnType
 		origDefFnName := g.defFnName
+		origDeclared := g.declared
+		origHoistedVars := g.hoistedVars
+		origHoistedSet := g.hoistedSet
+		origHoistedTypes := g.hoistedTypes
 		g.buf = bytes.Buffer{}
 		g.indent = 1
 		g.inDefFn = true
 		g.defFnReturnType = retType
 		g.defFnName = s.Name
+		// Use a fresh declared map so that variables hoisted in main() are not
+		// treated as already-declared inside this DEF FN body.  Each DEF FN
+		// function has its own local scope in Go.
+		g.declared = make(map[string]bool)
+		g.hoistedVars = nil
+		g.hoistedSet = make(map[string]bool)
+		g.hoistedTypes = make(map[string]string)
+		// Pre-seed with parameter names so we don't redeclare them.
+		for _, p := range s.Params {
+			pn := mangleName(p.Name)
+			g.declared[pn] = true
+			g.hoistedSet[pn] = true // don't hoist parameters
+		}
+		// Hoist variables used in the body to the top of the function so they
+		// are visible across all branches (e.g. SELECT CASE).
+		g.collectMainVariables(s.Body)
+		for _, hv := range g.hoistedVars {
+			g.declared[hv.name] = true
+		}
+		// Emit hoisted local variable declarations.
+		if len(g.hoistedVars) > 0 {
+			for _, hv := range g.hoistedVars {
+				g.writeLinef("var %s %s", hv.name, hv.typ)
+			}
+		}
 		for _, stmt := range s.Body {
 			g.emitStatement(stmt)
 		}
@@ -398,6 +515,10 @@ func (g *CodeGenerator) emitDefFn(s *ast.DefFnDeclaration) {
 		g.inDefFn = origInDefFn
 		g.defFnReturnType = origDefFnReturnType
 		g.defFnName = origDefFnName
+		g.declared = origDeclared
+		g.hoistedVars = origHoistedVars
+		g.hoistedSet = origHoistedSet
+		g.hoistedTypes = origHoistedTypes
 
 		g.funcWriteLinef(1, "return %s", zeroValueForType(retType))
 		g.funcWriteLine(0, "}")
@@ -405,11 +526,16 @@ func (g *CodeGenerator) emitDefFn(s *ast.DefFnDeclaration) {
 	}
 }
 
-func (g *CodeGenerator) emitParams(params []ast.Parameter) string {
+func (g *CodeGenerator) emitParams(params []ast.Parameter, byRef map[string]bool) string {
 	parts := make([]string, 0, len(params))
 	for _, p := range params {
 		name := mangleName(p.Name)
 		goT := g.goTypeForParamType(p.Type, p.Name)
+		if p.IsArray {
+			goT = "[]" + goT
+		} else if byRef[name] {
+			goT = "*" + goT
+		}
 		parts = append(parts, fmt.Sprintf("%s %s", name, goT))
 	}
 	return strings.Join(parts, ", ")

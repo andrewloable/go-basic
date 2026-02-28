@@ -13,8 +13,11 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
-	// Test SELECT CASE
+	// Hoisted variable declarations (avoids goto-over-declaration errors).
 	var i float32
+	_ = i
+
+	// Test SELECT CASE
 	end_0 := float32(10)
 	step_0 := float32(1)
 	for i = float32(1); (step_0 > 0 && i <= end_0) || (step_0 < 0 && i >= end_0) || (step_0 == 0); i += step_0 {

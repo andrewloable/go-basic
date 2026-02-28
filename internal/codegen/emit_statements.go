@@ -177,6 +177,16 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 			lbl := g.labelName(s.Target)
 			g.writeLinef("errState.SetHandler(\"%s\") // ON ERROR GOTO %s", lbl, s.Target)
 			g.onErrorLabel = lbl
+			// Emit a dead-code guard so Go's "label defined and not used" check is
+			// satisfied even when the label is never the target of a syntactic goto
+			// (e.g. when no ERROR n statement exists to emit one).  The guard is
+			// harmless when a real goto already exists.
+			key := strings.ToUpper(s.Target)
+			if g.onErrorTargets[key] {
+				g.writeLine("if false { goto " + lbl + " } // ON ERROR GOTO reachability guard")
+				// Clear so emitLabel/emitLineNumber don't emit a second guard.
+				delete(g.onErrorTargets, key)
+			}
 		}
 	case *ast.OnComputedGotoStatement:
 		g.emitOnComputedGoto(s)
@@ -185,7 +195,19 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 	case *ast.PokeStatement:
 		g.writeLinef("_ = %s; _ = %s // POKE (no-op in transpiled code)", g.emitExpr(s.Address), g.emitExpr(s.Value))
 	case *ast.ConstStatement:
-		g.writeLinef("%s := %s // CONST", mangleName(s.Name), g.emitExpr(s.Value))
+		name := mangleName(s.Name)
+		val := g.emitExpr(s.Value)
+		if g.constNames[name] {
+			// Promoted to package level — use assignment form with type cast.
+			goT := g.goTypeForIdent(s.Name)
+			if goT == "string" {
+				g.writeLinef("%s = %s // CONST", name, val)
+			} else {
+				g.writeLinef("%s = %s(%s) // CONST", name, goT, val)
+			}
+		} else {
+			g.writeLinef("%s := %s // CONST", name, val)
+		}
 	case *ast.ClearStatement:
 		// CLEAR resets all numeric variables to 0 and string variables to "".
 		// Emit an assignment to the zero value for every hoisted variable.
@@ -396,6 +418,10 @@ func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 			for _, a := range fc.Args {
 				args = append(args, g.emitExpr(a))
 			}
+			// Apply coercion (including by-ref pointer wrapping) for SUB/FUNCTION calls.
+			if g.program != nil && g.subFuncNames[strings.ToUpper(fc.Name)] {
+				args = g.coerceCallArgs(fc, args)
+			}
 			g.writeLinef("%s(%s)", mangleName(fc.Name), strings.Join(args, ", "))
 			return
 		}
@@ -408,6 +434,10 @@ func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 	// on non-byte-slice values; string concatenation and fmt.Sprint handle coercion).
 	if goT == "string" {
 		val := g.emitExpr(s.Value)
+		if g.paramsByRef[name] {
+			g.writeLinef("*%s = %s", name, val)
+			return
+		}
 		if !g.declared[name] {
 			g.declared[name] = true
 			g.writeLinef("var %s string = %s", name, val)
@@ -418,13 +448,36 @@ func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 	}
 
 	val := g.emitExpr(s.Value)
+	if g.paramsByRef[name] {
+		g.writeLinef("*%s = %s(%s)", name, goT, val)
+		return
+	}
 	if !g.declared[name] {
 		g.declared[name] = true
 		// Cast the value to the variable's type to handle mismatches between
 		// BASIC's implicit coercions and Go's strict typing.
 		g.writeLinef("var %s %s = %s(%s)", name, goT, goT, val)
 	} else {
-		g.writeLinef("%s = %s(%s)", name, goT, val)
+		// Use the hoisted/package type if available — it reflects the DIM/AS declaration
+		// and may differ from the suffix-based inference returned by goTypeForIdent.
+		castT := goT
+		if ht, ok := g.hoistedTypes[name]; ok {
+			castT = ht
+		} else if g.sharedVars[name] {
+			// For package-level variables, find the declared type.
+			for _, pv := range g.packageVars {
+				if pv.name == name {
+					// Strip array prefix for assignment cast
+					t := pv.typ
+					for strings.HasPrefix(t, "[]") {
+						t = t[2:]
+					}
+					castT = t
+					break
+				}
+			}
+		}
+		g.writeLinef("%s = %s(%s)", name, castT, val)
 	}
 }
 
@@ -562,7 +615,16 @@ func (g *CodeGenerator) emitRestore(_ *ast.RestoreStatement) {
 
 // emitTypeBlock emits a TYPE block as a Go struct definition.
 func (g *CodeGenerator) emitTypeBlock(s *ast.TypeBlockStatement) {
-	g.writeLinef("// TYPE %s (user-defined type — transpiled as struct)", s.Name)
+	// TYPE blocks are emitted as package-level struct definitions.
+	// Since they must be at package level, write to funcBuf.
+	// Use uppercase name to match DIM/param type resolution (parser stores types as uppercase).
+	g.funcWriteLinef(0, "type %s struct {", mangleName(strings.ToUpper(s.Name)))
+	for _, f := range s.Fields {
+		goT := g.goTypeForParamType(f.TypeName, f.Name)
+		g.funcWriteLinef(1, "%s %s", mangleName(f.Name), goT)
+	}
+	g.funcWriteLine(0, "}")
+	g.funcWriteLine(0, "")
 }
 
 // emitOnComputedGoto emits an ON expr GOTO t1, t2, ... as a series of if/goto.

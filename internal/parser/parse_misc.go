@@ -129,7 +129,7 @@ func (p *Parser) parseIdentifierStatement() ast.Statement {
 			p.nextToken()
 		}
 		data := p.parseExpression(PREC_LOWEST)
-		return &ast.FilePrintStatement{BasePos: pos, FileNum: fileNum, Expressions: []ast.Expression{data}}
+		return &ast.FilePrintStatement{BasePos: pos, FileNum: fileNum, Expressions: []ast.Expression{data}, IsBinaryPut: true}
 	case "GET$":
 		// GET$ filenum, length, var$ — binary file get
 		p.nextToken()
@@ -139,7 +139,7 @@ func (p *Parser) parseIdentifierStatement() ast.Statement {
 			p.nextToken()
 			args = append(args, p.parseExpression(PREC_LOWEST))
 		}
-		return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: args}
+		return &ast.FileInputStatement{BasePos: pos, FileNum: fileNum, Variables: args, IsBinaryGet: true}
 	}
 
 	// Identifier — could be assignment or sub call

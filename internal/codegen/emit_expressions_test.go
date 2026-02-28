@@ -259,7 +259,7 @@ func TestBuiltinRndIdentifier(t *testing.T) {
 	if !strings.Contains(out, "rng.Rnd(1)") {
 		t.Errorf("expected rng.Rnd(1), got:\n%s", out)
 	}
-	if !strings.Contains(out, "rng := rt.NewRNG()") {
+	if !strings.Contains(out, "rng = rt.NewRNG()") {
 		t.Errorf("expected rng preamble, got:\n%s", out)
 	}
 }
@@ -290,7 +290,7 @@ func TestBuiltinErrIdentifier(t *testing.T) {
 	if !strings.Contains(out, "float64(errState.Err())") {
 		t.Errorf("expected float64(errState.Err()), got:\n%s", out)
 	}
-	if !strings.Contains(out, "errState := rt.NewErrorState()") {
+	if !strings.Contains(out, "errState = rt.NewErrorState()") {
 		t.Errorf("expected errState preamble, got:\n%s", out)
 	}
 }
@@ -308,7 +308,7 @@ func TestBuiltinErlIdentifier(t *testing.T) {
 	if !strings.Contains(out, "float64(errState.Erl())") {
 		t.Errorf("expected float64(errState.Erl()), got:\n%s", out)
 	}
-	if !strings.Contains(out, "errState := rt.NewErrorState()") {
+	if !strings.Contains(out, "errState = rt.NewErrorState()") {
 		t.Errorf("expected errState preamble, got:\n%s", out)
 	}
 }

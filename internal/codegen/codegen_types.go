@@ -251,6 +251,9 @@ func (g *CodeGenerator) goTypeForDecl(d ast.DimDecl) string {
 			return "float64"
 		case "STRING":
 			return "string"
+		default:
+			// User-defined TYPE (struct)
+			return mangleName(d.ElementType)
 		}
 	}
 	return g.goTypeForIdent(d.Name + d.TypeSuffix)
@@ -286,8 +289,12 @@ func (g *CodeGenerator) goTypeForParamType(typeStr string, name string) string {
 		return "float64"
 	case "STRING", "$":
 		return "string"
+	case "":
+		return g.goTypeForIdent(name)
+	default:
+		// User-defined TYPE (struct) — use the mangled TYPE name.
+		return mangleName(typeStr)
 	}
-	return g.goTypeForIdent(name)
 }
 
 // goTypeFromSuffix infers a Go type from the variable name's suffix character.
@@ -357,7 +364,7 @@ func numericWidth(goTypeName string) int {
 	switch goTypeName {
 	case "int16":
 		return 0
-	case "int32":
+	case "int", "int32":
 		return 1
 	case "float32":
 		return 2
@@ -410,6 +417,18 @@ func (g *CodeGenerator) goTypeForExpr(expr ast.Expression) string {
 	case *ast.StringLiteral:
 		return "string"
 	case *ast.Identifier:
+		// Handle built-in identifiers that have a fixed emitted type.
+		switch strings.ToUpper(e.Name + e.TypeSuffix) {
+		case "RND":
+			return "float32" // emitted as float32(rng.Rnd(1))
+		case "TIMER":
+			return "float64"
+		}
+		// Check hoisted type first — DIM AS declarations override suffix inference.
+		mn := mangleName(e.Name + e.TypeSuffix)
+		if ht, ok := g.hoistedTypes[mn]; ok {
+			return ht
+		}
 		return g.goTypeForIdent(e.Name + e.TypeSuffix)
 	case *ast.ArrayAccess:
 		return g.goTypeForIdent(e.Name + e.TypeSuffix)
@@ -418,17 +437,30 @@ func (g *CodeGenerator) goTypeForExpr(expr ast.Expression) string {
 	case *ast.UnaryExpr:
 		return g.goTypeForExpr(e.Operand)
 	case *ast.BinaryExpr:
+		op := strings.ToUpper(e.Operator)
+		// Integer division (\) and MOD emit int(...) casts, producing Go int.
+		if op == "\\" || op == "MOD" {
+			return "int"
+		}
 		lt := g.goTypeForExpr(e.Left)
 		rt := g.goTypeForExpr(e.Right)
 		return widenType(lt, rt)
 	case *ast.FunctionCall:
-		return goTypeForBuiltin(strings.ToUpper(e.Name))
+		builtinType := goTypeForBuiltin(strings.ToUpper(e.Name))
+		if builtinType != "float64" {
+			return builtinType // known built-in with specific type
+		}
+		// For user-defined functions, infer from the function name's suffix/symbol table.
+		if g.subFuncNames[strings.ToUpper(e.Name)] {
+			return g.goTypeForIdent(e.Name)
+		}
+		return builtinType
 	case *ast.FnCallExpression:
 		// DEF FN functions: infer from suffix of function name.
 		return g.goTypeForIdent(e.Name)
 	case *ast.FieldAccessExpression:
-		// Struct field: conservative default.
-		return "float64"
+		// Struct field: infer from the field name's suffix.
+		return g.goTypeForIdent(e.Field)
 	default:
 		return "float64"
 	}

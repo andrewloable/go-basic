@@ -68,8 +68,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitIf(s *ast.IfStatement) {
-	cond := g.emitExpr(s.Condition)
-	g.writeLinef("if %s {", g.toBoolExpr(cond))
+	g.writeLinef("if %s {", g.toBoolExprFromNode(s.Condition))
 	g.indent++
 	for _, stmt := range s.ThenBlock {
 		g.emitStatement(stmt)
@@ -77,8 +76,7 @@ func (g *CodeGenerator) emitIf(s *ast.IfStatement) {
 	g.indent--
 
 	for _, clause := range s.ElseIfClauses {
-		ec := g.emitExpr(clause.Condition)
-		g.writeLinef("} else if %s {", g.toBoolExpr(ec))
+		g.writeLinef("} else if %s {", g.toBoolExprFromNode(clause.Condition))
 		g.indent++
 		for _, stmt := range clause.Body {
 			g.emitStatement(stmt)
@@ -178,7 +176,13 @@ func (g *CodeGenerator) emitFor(s *ast.ForStatement) {
 	stepVar := fmt.Sprintf("step_%d", g.tempCount)
 	g.tempCount++
 
+	// Prefer the hoisted/declared type for the counter — it reflects
+	// DIM AS declarations (e.g., DIM i AS SINGLE → float32) which override
+	// the suffix-based inference from goTypeForIdent.
 	counterType := g.goTypeForIdent(s.Counter.Name + s.Counter.TypeSuffix)
+	if ht, ok := g.hoistedTypes[counter]; ok {
+		counterType = ht
+	}
 	g.writeLinef("%s := %s(%s)", endVar, counterType, endExpr)
 	g.writeLinef("%s := %s(%s)", stepVar, counterType, stepExpr)
 	g.writeLinef("for %s = %s(%s); (%s > 0 && %s <= %s) || (%s < 0 && %s >= %s) || (%s == 0); %s += %s {",
@@ -200,8 +204,7 @@ func (g *CodeGenerator) emitFor(s *ast.ForStatement) {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitWhile(s *ast.WhileStatement) {
-	cond := g.emitExpr(s.Condition)
-	g.writeLinef("for %s {", g.toBoolExpr(cond))
+	g.writeLinef("for %s {", g.toBoolExprFromNode(s.Condition))
 	g.indent++
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
@@ -227,8 +230,7 @@ func (g *CodeGenerator) emitDoLoop(s *ast.DoLoopStatement) {
 		return
 	}
 
-	cond := g.emitExpr(s.Condition)
-	boolCond := g.toBoolExpr(cond)
+	boolCond := g.toBoolExprFromNode(s.Condition)
 
 	if s.TestAtTop {
 		if s.IsUntil {

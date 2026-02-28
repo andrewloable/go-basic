@@ -134,7 +134,7 @@ func (g *CodeGenerator) emitIdentifier(id *ast.Identifier) string {
 		return "rt.TimeStr()"
 	case "RND":
 		g.needRng = true
-		return "rng.Rnd(1)"
+		return "float32(rng.Rnd(1))"
 	case "ERR":
 		g.needErrState = true
 		return "float64(errState.Err())"
@@ -146,7 +146,27 @@ func (g *CodeGenerator) emitIdentifier(id *ast.Identifier) string {
 	case "TIMER":
 		return "rt.Timer()"
 	}
-	return mangleName(id.Name + id.TypeSuffix)
+	// If this identifier matches a FUNCTION name (no parens), emit as call.
+	// BASIC allows calling zero-arg functions without parentheses.
+	// First try matching with a type suffix (e.g., "CalcDelay" → "CalcDelay!")
+	// to get the correct mangled name including the suffix.
+	if id.TypeSuffix == "" {
+		for _, suf := range []string{"%", "$", "!", "#", "&"} {
+			if g.subFuncNames[strings.ToUpper(id.Name)+suf] {
+				return mangleName(id.Name+suf) + "()"
+			}
+		}
+	}
+	fullName := strings.ToUpper(id.Name + id.TypeSuffix)
+	if g.subFuncNames[fullName] {
+		return mangleName(id.Name+id.TypeSuffix) + "()"
+	}
+	mangledName := mangleName(id.Name + id.TypeSuffix)
+	// If this identifier is a by-ref parameter, dereference the pointer.
+	if g.paramsByRef[mangledName] {
+		return "(*" + mangledName + ")"
+	}
+	return mangledName
 }
 
 // ---------------------------------------------------------------------------
@@ -192,15 +212,15 @@ func (g *CodeGenerator) emitBinaryExpr(e *ast.BinaryExpr) string {
 		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s >= %s)", left, right)
 	case "AND":
-		return fmt.Sprintf("(int(%s) & int(%s))", left, right)
+		return fmt.Sprintf("(%s & %s)", g.boolToIntStr(e.Left, left), g.boolToIntStr(e.Right, right))
 	case "OR":
-		return fmt.Sprintf("(int(%s) | int(%s))", left, right)
+		return fmt.Sprintf("(%s | %s)", g.boolToIntStr(e.Left, left), g.boolToIntStr(e.Right, right))
 	case "XOR":
-		return fmt.Sprintf("(int(%s) ^ int(%s))", left, right)
+		return fmt.Sprintf("(%s ^ %s)", g.boolToIntStr(e.Left, left), g.boolToIntStr(e.Right, right))
 	case "EQV":
-		return fmt.Sprintf("(^(int(%s) ^ int(%s)))", left, right)
+		return fmt.Sprintf("(^(%s ^ %s))", g.boolToIntStr(e.Left, left), g.boolToIntStr(e.Right, right))
 	case "IMP":
-		return fmt.Sprintf("((^int(%s)) | int(%s))", left, right)
+		return fmt.Sprintf("((^%s) | %s)", g.boolToIntStr(e.Left, left), g.boolToIntStr(e.Right, right))
 	default:
 		return fmt.Sprintf("(%s /* %s */ %s)", left, op, right)
 	}
@@ -468,6 +488,14 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "SPACE$":
 		return fmt.Sprintf("rt.Space(int(%s))", g.oneArg(args))
 	case "STRING$":
+		// Second arg: can be char code (numeric) or a string (use first byte).
+		// byte(string) is invalid in Go; use (s)[0] indexing for string literals.
+		if len(fc.Args) >= 2 {
+			if _, isStr := fc.Args[1].(*ast.StringLiteral); isStr {
+				// STRING$(n, "*") → rt.StringRepeat(int(n), ("*")[0])
+				return fmt.Sprintf("rt.StringRepeat(int(%s), (%s)[0])", g.argN(args, 0), g.argN(args, 1))
+			}
+		}
 		return fmt.Sprintf("rt.StringRepeat(int(%s), byte(%s))", g.argN(args, 0), g.argN(args, 1))
 
 	// Conversion binary functions.
@@ -488,13 +516,15 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "CVD":
 		return fmt.Sprintf("func() float64 { v_, _ := rt.Cvd(%s); return v_ }()", g.oneArg(args))
 
-	// Random.
+	// Random. rng.Rnd returns float64 but BASIC's default numeric type is float32,
+	// so wrap in float32() to avoid mismatched-type errors when mixed with
+	// float32 operands like (High - Low + 1).
 	case "RND":
 		g.needRng = true
 		if len(args) > 0 {
-			return fmt.Sprintf("rng.Rnd(%s)", castF64(0))
+			return fmt.Sprintf("float32(rng.Rnd(%s))", castF64(0))
 		}
-		return "rng.Rnd(1)"
+		return "float32(rng.Rnd(1))"
 
 	// Timer / system.
 	case "TIMER":
@@ -514,9 +544,28 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "SPC":
 		return fmt.Sprintf("rt.Spc(int(%s))", g.oneArg(args))
 
+	// Graphics functions.
+	case "POINT":
+		if len(args) >= 2 {
+			return fmt.Sprintf("rt.Point(%s, %s)", castF64(0), castF64(1))
+		}
+		return fmt.Sprintf("rt.Point(%s, 0)", castF64(0))
+
 	// Memory / hardware stubs.
 	case "FRE":
 		if len(args) > 0 {
+			// FRE("") selects the string memory pool in BASIC; FRE(0) selects numeric.
+			// In Go, rt.Fre is always a stub returning 0.0.  But float64(string) is
+			// invalid, so when the argument is a string literal (or string-typed ident),
+			// pass 0.0 directly to avoid a compile error.
+			if _, isStr := fc.Args[0].(*ast.StringLiteral); isStr {
+				return "rt.Fre(0.0)"
+			}
+			if id, isIdent := fc.Args[0].(*ast.Identifier); isIdent {
+				if id.TypeSuffix == "$" || strings.HasSuffix(id.Name, "_str") {
+					return "rt.Fre(0.0)"
+				}
+			}
 			return fmt.Sprintf("rt.Fre(%s)", castF64(0))
 		}
 		return "rt.Fre(0)"
@@ -536,7 +585,12 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 
 	default:
 		// User-defined function or unmapped built-in: call directly.
+		// Coerce arguments to match parameter types when available.
 		mangledName := mangleName(fc.Name)
+		if g.program != nil && g.subFuncNames[strings.ToUpper(fc.Name)] {
+			coerced := g.coerceCallArgs(fc, args)
+			return fmt.Sprintf("%s(%s)", mangledName, strings.Join(coerced, ", "))
+		}
 		return fmt.Sprintf("%s(%s)", mangledName, strings.Join(args, ", "))
 	}
 }
@@ -568,17 +622,33 @@ func (g *CodeGenerator) emitArrayAccess(aa *ast.ArrayAccess) string {
 	// so it may produce an ArrayAccess node for what is really a call site.
 	// Here we do a symbol-table lookup and, when the name is a function/sub,
 	// emit a proper Go function call instead of a slice index expression.
+	fullName := aa.Name + aa.TypeSuffix
+	isFunc := false
 	if g.table != nil {
-		if sym := g.table.Lookup(aa.Name); sym != nil {
-			if sym.Type == semantic.SymFunction || sym.Type == semantic.SymSub || sym.Type == semantic.SymDefFn {
-				mangledName := mangleName(aa.Name)
-				args := make([]string, 0, len(aa.Indices))
-				for _, idx := range aa.Indices {
-					args = append(args, g.emitExpr(idx))
-				}
-				return fmt.Sprintf("%s(%s)", mangledName, strings.Join(args, ", "))
-			}
+		sym := g.table.Lookup(fullName)
+		if sym == nil {
+			sym = g.table.Lookup(aa.Name)
 		}
+		if sym != nil && (sym.Type == semantic.SymFunction || sym.Type == semantic.SymSub || sym.Type == semantic.SymDefFn) {
+			isFunc = true
+		}
+	}
+	if !isFunc {
+		upperName := strings.ToUpper(fullName)
+		if g.subFuncNames[upperName] || g.subFuncNames[strings.ToUpper(aa.Name)] {
+			isFunc = true
+		}
+	}
+	if isFunc {
+		mangledName := mangleName(fullName)
+		args := make([]string, 0, len(aa.Indices))
+		for _, idx := range aa.Indices {
+			args = append(args, g.emitExpr(idx))
+		}
+		// Coerce arguments to match parameter types.
+		fc := &ast.FunctionCall{Name: aa.Name, Args: aa.Indices}
+		coerced := g.coerceCallArgs(fc, args)
+		return fmt.Sprintf("%s(%s)", mangledName, strings.Join(coerced, ", "))
 	}
 
 	name := mangleName(aa.Name + aa.TypeSuffix)
@@ -609,6 +679,45 @@ func (g *CodeGenerator) emitFnCallExpression(e *ast.FnCallExpression) string {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: detect boolean (comparison) expressions for AND/OR/XOR/EQV/IMP
+// ---------------------------------------------------------------------------
+
+// isBoolExpr returns true when expr is a comparison BinaryExpr (one that
+// produces a Go bool).  Comparison operators in BASIC produce bool in Go
+// (via ==, !=, <, >, <=, >=), so wrapping them in int() is invalid Go.
+// We must convert them via an IIFE instead.
+func isBoolExpr(e ast.Expression) bool {
+	if e == nil {
+		return false
+	}
+	// Unwrap GroupExpr (parentheses) to check the inner expression.
+	if grp, ok := e.(*ast.GroupExpr); ok {
+		return isBoolExpr(grp.Inner)
+	}
+	bin, ok := e.(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+	switch strings.ToUpper(bin.Operator) {
+	case "=", "<>", "><", "<", ">", "<=", ">=", "=<", "=>":
+		return true
+	}
+	return false
+}
+
+// boolToIntStr converts a possibly-boolean expression string to an int
+// expression string suitable for bitwise operations.
+// When expr is a comparison operator (returns Go bool), int(bool) is invalid,
+// so we emit an IIFE that converts true→1 / false→0.
+// Otherwise we emit int(s) as before.
+func (g *CodeGenerator) boolToIntStr(expr ast.Expression, s string) string {
+	if isBoolExpr(expr) {
+		return fmt.Sprintf("func() int { if %s { return 1 }; return 0 }()", s)
+	}
+	return fmt.Sprintf("int(%s)", s)
+}
+
+// ---------------------------------------------------------------------------
 // Helper: convert an expression to a Go bool expression
 // ---------------------------------------------------------------------------
 
@@ -621,6 +730,35 @@ func (g *CodeGenerator) toBoolExpr(expr string) string {
 		return expr
 	}
 	return fmt.Sprintf("(%s) != 0", expr)
+}
+
+// toBoolExprFromNode is an AST-aware version of toBoolExpr. It inspects
+// the top-level AST node to determine whether the emitted expression is
+// already boolean or needs a != 0 wrapper.
+//
+// This avoids the text-heuristic false-positive in toBoolExpr where
+// AND/OR/XOR operands contain '<' and '>' inside IIFE bodies, tricking
+// looksLikeBool into thinking the result is already a Go bool.
+func (g *CodeGenerator) toBoolExprFromNode(e ast.Expression) string {
+	emitted := g.emitExpr(e)
+	if bin, ok := e.(*ast.BinaryExpr); ok {
+		switch strings.ToUpper(bin.Operator) {
+		case "AND", "OR", "XOR", "EQV", "IMP":
+			// Bitwise/logical ops on integers always produce int, not bool.
+			return fmt.Sprintf("(%s) != 0", emitted)
+		case "=", "<>", "<", ">", "<=", ">=", "=<", "=>":
+			// Comparison operators already produce a Go bool.
+			return emitted
+		}
+	}
+	if un, ok := e.(*ast.UnaryExpr); ok {
+		if strings.ToUpper(un.Operator) == "NOT" {
+			// NOT produces ^int(...) which is an int, not a bool.
+			return fmt.Sprintf("(%s) != 0", emitted)
+		}
+	}
+	// Fall through to the text heuristic for other expression types.
+	return g.toBoolExpr(emitted)
 }
 
 func looksLikeBool(s string) bool {
@@ -660,6 +798,97 @@ func (g *CodeGenerator) oneArg(args []string) string {
 		return args[0]
 	}
 	return "0"
+}
+
+// coerceCallArgs wraps each argument in a type cast if the Go type of the
+// argument differs from the declared parameter type of the called function.
+// For by-ref parameters (assigned inside the body and not BYVAL), it wraps
+// the argument in &, creating a temp variable for literals that can't be
+// addressed directly.
+func (g *CodeGenerator) coerceCallArgs(fc *ast.FunctionCall, args []string) []string {
+	// Find the function/sub declaration in the program.
+	var params []ast.Parameter
+	var body []ast.Statement
+	upperName := strings.ToUpper(fc.Name)
+	for _, stmt := range g.program.Statements {
+		switch s := stmt.(type) {
+		case *ast.FunctionDeclaration:
+			if strings.ToUpper(s.Name) == upperName {
+				params = s.Params
+				body = s.Body
+			}
+		case *ast.SubDeclaration:
+			if strings.ToUpper(s.Name) == upperName {
+				params = s.Params
+				body = s.Body
+			}
+		}
+	}
+	if params == nil {
+		return args
+	}
+	// Determine which parameters are by-ref for this callee.
+	byRef := g.findAssignedParams(body, params)
+
+	result := make([]string, len(args))
+	copy(result, args)
+	for i := 0; i < len(result) && i < len(params); i++ {
+		if params[i].IsArray {
+			continue // array params don't need scalar casts
+		}
+		paramType := g.goTypeForParamType(params[i].Type, params[i].Name)
+		mangledParam := mangleName(params[i].Name)
+
+		if byRef[mangledParam] {
+			// By-ref parameter: need to pass &arg.
+			// Check if the argument is a simple addressable variable.
+			isAddressable := false
+			if i < len(fc.Args) {
+				if id, isIdent := fc.Args[i].(*ast.Identifier); isIdent {
+					argMangled := mangleName(id.Name + id.TypeSuffix)
+					if g.paramsByRef[argMangled] {
+						// Already a pointer in current scope — pass directly.
+						result[i] = argMangled
+						continue
+					}
+					// Check it's not a builtin/function
+					upper := strings.ToUpper(id.Name + id.TypeSuffix)
+					if !g.subFuncNames[upper] {
+						isAddressable = true
+					}
+				}
+			}
+			if isAddressable {
+				result[i] = fmt.Sprintf("&%s", result[i])
+			} else {
+				// Non-addressable (literal, expression, function call, etc.):
+				// use inline func to create a temp addressable value.
+				if paramType == "string" {
+					result[i] = fmt.Sprintf("func() *%s { v_ := %s; return &v_ }()", paramType, result[i])
+				} else {
+					result[i] = fmt.Sprintf("func() *%s { v_ := %s(%s); return &v_ }()", paramType, paramType, result[i])
+				}
+			}
+			continue
+		}
+
+		pw := numericWidth(paramType)
+		if pw < 0 {
+			continue // non-numeric parameter
+		}
+		// Check if the argument is a plain untyped literal — if so, skip
+		// (Go handles untyped constant conversion automatically).
+		if i < len(fc.Args) {
+			if _, isLit := fc.Args[i].(*ast.NumberLiteral); isLit {
+				continue
+			}
+		}
+		// Always wrap the argument in a type cast to the parameter type.
+		// This handles cases where goTypeForExpr is inaccurate due to
+		// untyped constant inference by Go.
+		result[i] = fmt.Sprintf("%s(%s)", paramType, result[i])
+	}
+	return result
 }
 
 func (g *CodeGenerator) argN(args []string, n int) string {

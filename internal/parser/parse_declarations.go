@@ -26,10 +26,14 @@ func (p *Parser) parseDimStatement(isRedim bool) ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip DIM/REDIM
 
-	// Skip optional scope modifiers: SHARED, LOCAL, STATIC, COMMON, DYNAMIC
+	// Check for optional scope modifiers: SHARED, LOCAL, STATIC, COMMON, DYNAMIC
+	isShared := false
 	for p.curTokenIs(lexer.TOKEN_SHARED) || p.curTokenIs(lexer.TOKEN_LOCAL) ||
 		p.curTokenIs(lexer.TOKEN_STATIC) || p.curTokenIs(lexer.TOKEN_COMMON) ||
 		(p.curTokenIs(lexer.TOKEN_IDENTIFIER) && strings.ToUpper(p.curToken.Literal) == "DYNAMIC") {
+		if p.curTokenIs(lexer.TOKEN_SHARED) {
+			isShared = true
+		}
 		p.nextToken()
 	}
 
@@ -47,7 +51,7 @@ func (p *Parser) parseDimStatement(isRedim bool) ast.Statement {
 	if isRedim {
 		return &ast.RedimStatement{BasePos: pos, Declarations: decls}
 	}
-	return &ast.DimStatement{BasePos: pos, Declarations: decls}
+	return &ast.DimStatement{BasePos: pos, Declarations: decls, IsShared: isShared}
 }
 
 func (p *Parser) parseDimDecl() ast.DimDecl {
@@ -269,6 +273,7 @@ func (p *Parser) parseParameterList() []ast.Parameter {
 		// Handle array parameter marker: paramName() — the () indicates the param
 		// is passed as an array reference (e.g., SUB Foo (arr() AS Integer))
 		if p.curTokenIs(lexer.TOKEN_LPAREN) {
+			param.IsArray = true
 			p.nextToken() // skip (
 			if p.curTokenIs(lexer.TOKEN_RPAREN) {
 				p.nextToken() // skip )
