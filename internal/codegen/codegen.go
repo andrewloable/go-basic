@@ -108,8 +108,50 @@ type CodeGenerator struct {
 	// needRng tracks whether the rng variable is needed.
 	needRng bool
 
+	// needErrState tracks whether the errState variable is needed (for ERR builtin).
+	needErrState bool
+
 	// hasRead tracks whether any DATA READ statements exist (to emit dataPool).
 	hasRead bool
+
+	// needFileManager tracks whether the fm *rt.FileManager variable is needed.
+	needFileManager bool
+
+	// inDefFn is true while emitting the body of a multi-line DEF FN.
+	inDefFn bool
+	// defFnReturnType is the Go return type of the DEF FN currently being emitted.
+	defFnReturnType string
+	// defFnName is the BASIC name of the DEF FN currently being emitted (e.g. "FNFactorial#").
+	defFnName string
+
+	// hoistedVars collects variable declarations to hoist to the top of main()
+	// to avoid goto-over-declaration errors in Go. Each entry is {mangledName, goType}.
+	hoistedVars []hoistedVar
+	// hoistedSet tracks which mangled names have been added to hoistedVars.
+	hoistedSet map[string]bool
+	// hasGoto tracks whether the program contains any GOTO/GOSUB statements.
+	hasGoto bool
+
+	// sharedVars tracks mangled names of variables declared SHARED in any SUB/FUNCTION.
+	// These variables are emitted as package-level var declarations.
+	sharedVars map[string]bool
+	// packageVars collects package-level variable declarations for SHARED variables.
+	packageVars []hoistedVar
+	// packageVarSet tracks which mangled names have been added to packageVars.
+	packageVarSet map[string]bool
+	// inSubOrFunc is true while emitting the body of a SUB or FUNCTION.
+	inSubOrFunc bool
+
+	// arrayDims tracks the number of dimensions for each array (by mangled name).
+	// Used by emitArrayAccess and emitArrayAssignment to emit the correct
+	// number of index brackets for multi-dimensional arrays.
+	arrayDims map[string]int
+}
+
+// hoistedVar represents a variable declaration to be hoisted to the top of main().
+type hoistedVar struct {
+	name string // mangled Go name
+	typ  string // Go type (e.g. "float32", "string")
 }
 
 // New creates a fresh CodeGenerator ready for use.
@@ -120,6 +162,10 @@ func New() *CodeGenerator {
 		labelMap:         make(map[string]bool),
 		referencedLabels: make(map[string]bool),
 		gosubFuncs:       make(map[string]bool),
+		hoistedSet:       make(map[string]bool),
+		sharedVars:       make(map[string]bool),
+		packageVarSet:    make(map[string]bool),
+		arrayDims:        make(map[string]int),
 	}
 }
 
@@ -131,6 +177,39 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 
 	// Pre-pass: collect labels & DATA values.
 	g.collectLabelsAndData(program.Statements)
+
+	// Pre-pass: collect SHARED variables from SUB/FUNCTION bodies.
+	// These will be emitted as package-level var declarations.
+	g.collectSharedVars(program.Statements)
+
+	// Pre-populate declared map for shared/package-level variables so they
+	// are not re-declared inside main().
+	for _, pv := range g.packageVars {
+		g.declared[pv.name] = true
+	}
+
+	// Check if the program uses any GOTO/GOSUB statements.
+	g.hasGoto = len(g.referencedLabels) > 0
+
+	// If GOTOs exist, collect all main-level variables for hoisting to avoid
+	// goto-over-declaration errors in Go.
+	if g.hasGoto {
+		// Only collect from main-level statements (skip SUB/FUNCTION).
+		mainStmts := make([]ast.Statement, 0, len(program.Statements))
+		for _, stmt := range program.Statements {
+			switch stmt.(type) {
+			case *ast.SubDeclaration, *ast.FunctionDeclaration:
+				continue
+			}
+			mainStmts = append(mainStmts, stmt)
+		}
+		g.collectMainVariables(mainStmts)
+
+		// Pre-populate declared map so emitLet/emitFor/etc. use assignment form.
+		for _, hv := range g.hoistedVars {
+			g.declared[hv.name] = true
+		}
+	}
 
 	// ---- Emit main body into g.buf ----
 	g.indent = 1
@@ -190,6 +269,15 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 	out.WriteString("var _ = rt.Abs\n")
 	out.WriteString("\n")
 
+	// Emit package-level variable declarations for SHARED variables.
+	if len(g.packageVars) > 0 {
+		out.WriteString("// Package-level variables (SHARED across SUBs).\n")
+		for _, pv := range g.packageVars {
+			out.WriteString(fmt.Sprintf("var %s %s\n", pv.name, pv.typ))
+		}
+		out.WriteString("\n")
+	}
+
 	// main function.
 	out.WriteString("func main() {\n")
 
@@ -199,6 +287,18 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 		out.WriteString("\t_ = rng\n")
 	}
 
+	// Declare errState if needed (for ERR / ERL builtins).
+	if g.needErrState {
+		out.WriteString("\terrState := rt.NewErrorState()\n")
+		out.WriteString("\t_ = errState\n")
+	}
+
+	// Declare FileManager if needed (for OPEN/CLOSE file I/O).
+	if g.needFileManager {
+		out.WriteString("\tfm := rt.NewFileManager()\n")
+		out.WriteString("\tdefer fm.FileCloseAll()\n")
+	}
+
 	// Declare DATA pool if needed.
 	if hasData {
 		out.WriteString("\tvar dataPool []interface{}\n")
@@ -206,6 +306,15 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 		g.emitDataPoolInit(&out)
 		out.WriteString("\tdataIdx := 0\n")
 		out.WriteString("\t_ = dataIdx\n")
+	}
+
+	// Emit hoisted variable declarations (goto-over-declaration fix).
+	if len(g.hoistedVars) > 0 {
+		out.WriteString("\t// Hoisted variable declarations (avoids goto-over-declaration errors).\n")
+		for _, hv := range g.hoistedVars {
+			out.WriteString(fmt.Sprintf("\tvar %s %s\n", hv.name, hv.typ))
+		}
+		out.WriteString("\n")
 	}
 
 	out.Write(g.buf.Bytes())
@@ -243,15 +352,22 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			if !s.IsInput {
 				g.hasRead = true
 			}
+		case *ast.RestoreStatement:
+			g.hasRead = true
 
 		// Collect GOTO/GOSUB targets — these become goto labels in Go.
 		case *ast.GotoStatement:
 			g.referencedLabels[strings.ToUpper(s.Target)] = true
 		case *ast.GosubStatement:
 			g.referencedLabels[strings.ToUpper(s.Target)] = true
-		// ON ERROR GOTO is emitted as a TODO comment (not a real goto), so we
-		// intentionally do NOT add its target to referencedLabels. That way the
-		// error-handler label is suppressed in the output and the file compiles.
+		case *ast.OnErrorGotoStatement:
+			if s.Target != "0" && s.Target != "" {
+				g.referencedLabels[strings.ToUpper(s.Target)] = true
+			}
+		case *ast.ResumeStatement:
+			if s.Type != "" && s.Type != "NEXT" {
+				g.referencedLabels[strings.ToUpper(s.Type)] = true
+			}
 		case *ast.OnComputedGotoStatement:
 			for _, t := range s.Targets {
 				g.referencedLabels[strings.ToUpper(t)] = true
@@ -282,7 +398,130 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			for _, c := range s.Cases {
 				g.collectLabelsAndData(c.Body)
 			}
+		case *ast.DefFnDeclaration:
+			g.collectLabelsAndData(s.Body)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pre-pass: collect variables for hoisting (goto-over-declaration fix)
+// ---------------------------------------------------------------------------
+
+// collectMainVariables walks the main-level statements (not SUB/FUNCTION) and
+// records every variable that will need a `var` declaration. When the program
+// contains GOTOs, these declarations are hoisted to the top of main() so that
+// no goto can jump over a variable declaration — which is a compile error in Go.
+func (g *CodeGenerator) collectMainVariables(stmts []ast.Statement) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetStatement:
+			name := mangleName(s.Name.Name + s.Name.TypeSuffix)
+			goT := g.goTypeForIdent(s.Name.Name + s.Name.TypeSuffix)
+			g.addHoistedVar(name, goT)
+
+		case *ast.ForStatement:
+			counter := mangleName(s.Counter.Name + s.Counter.TypeSuffix)
+			goT := g.goTypeForIdent(s.Counter.Name + s.Counter.TypeSuffix)
+			g.addHoistedVar(counter, goT)
+			g.collectMainVariables(s.Body)
+
+		case *ast.DimStatement:
+			for _, d := range s.Declarations {
+				name := mangleName(d.Name + d.TypeSuffix)
+				if len(d.Dimensions) == 0 {
+					goT := g.goTypeForDecl(d)
+					g.addHoistedVar(name, goT)
+				} else if len(d.Dimensions) == 1 {
+					goT := g.goTypeForDecl(d)
+					g.addHoistedVar(name, "[]"+goT)
+				} else {
+					goT := g.goTypeForDecl(d)
+					g.addHoistedVar(name, "[]"+goT)
+				}
+			}
+
+		case *ast.ReadStatement:
+			for _, v := range s.Variables {
+				if ident, ok := v.(*ast.Identifier); ok {
+					name := mangleName(ident.Name + ident.TypeSuffix)
+					goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+					g.addHoistedVar(name, goT)
+				}
+			}
+
+		// Recurse into nested blocks (but not SUB/FUNCTION — those are top-level).
+		case *ast.IfStatement:
+			g.collectMainVariables(s.ThenBlock)
+			for _, clause := range s.ElseIfClauses {
+				g.collectMainVariables(clause.Body)
+			}
+			g.collectMainVariables(s.ElseBlock)
+		case *ast.WhileStatement:
+			g.collectMainVariables(s.Body)
+		case *ast.DoLoopStatement:
+			g.collectMainVariables(s.Body)
+		case *ast.SelectCaseStatement:
+			for _, c := range s.Cases {
+				g.collectMainVariables(c.Body)
+			}
+		case *ast.DefFnDeclaration:
+			g.collectMainVariables(s.Body)
+		}
+	}
+}
+
+// collectSharedVars walks all SUB/FUNCTION declarations and finds
+// SHARED statements, marking those variables as package-level.
+func (g *CodeGenerator) collectSharedVars(stmts []ast.Statement) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.SubDeclaration:
+			g.collectSharedFromBody(s.Body)
+		case *ast.FunctionDeclaration:
+			g.collectSharedFromBody(s.Body)
+		}
+	}
+}
+
+// collectSharedFromBody scans a SUB/FUNCTION body for SHARED scope statements
+// and registers each listed variable as a package-level variable.
+func (g *CodeGenerator) collectSharedFromBody(body []ast.Statement) {
+	for _, stmt := range body {
+		scope, ok := stmt.(*ast.ScopeStatement)
+		if !ok || scope.Modifier != "SHARED" {
+			continue
+		}
+		for _, v := range scope.Variables {
+			name := mangleName(v)
+			goT := g.goTypeForIdent(v)
+			g.sharedVars[name] = true
+			if !g.packageVarSet[name] {
+				g.packageVarSet[name] = true
+				g.packageVars = append(g.packageVars, hoistedVar{name: name, typ: goT})
+			}
+		}
+	}
+}
+
+// addPackageVar records a variable for package-level emission, avoiding duplicates.
+func (g *CodeGenerator) addPackageVar(name, goType string) {
+	if !g.packageVarSet[name] {
+		g.packageVarSet[name] = true
+		g.packageVars = append(g.packageVars, hoistedVar{name: name, typ: goType})
+		g.sharedVars[name] = true
+	}
+}
+
+// addHoistedVar records a variable for hoisting, avoiding duplicates.
+// Variables that are already package-level (SHARED) are skipped.
+func (g *CodeGenerator) addHoistedVar(name, goType string) {
+	if g.sharedVars[name] {
+		return // already declared at package level
+	}
+	if !g.hoistedSet[name] {
+		g.hoistedSet[name] = true
+		g.hoistedVars = append(g.hoistedVars, hoistedVar{name: name, typ: goType})
 	}
 }
 
@@ -377,6 +616,8 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		g.emitPrint(s)
 	case *ast.LetStatement:
 		g.emitLet(s)
+	case *ast.RandomizeStatement:
+		g.emitRandomize(s)
 	case *ast.ArrayAssignment:
 		g.emitArrayAssignment(s)
 	case *ast.IfStatement:
@@ -443,14 +684,51 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		g.emitOpen(s)
 	case *ast.CloseStatement:
 		g.emitClose(s)
+	case *ast.FilePrintStatement:
+		g.emitFilePrint(s)
+	case *ast.FileInputStatement:
+		g.emitFileInput(s)
+	case *ast.FileWriteStatement:
+		g.emitFileWrite(s)
+	case *ast.FieldStatement:
+		g.emitField(s)
+	case *ast.LsetStatement:
+		g.emitLset(s)
+	case *ast.RsetStatement:
+		g.emitRset(s)
+	case *ast.PutStatement:
+		g.emitPut(s)
+	case *ast.GetStatement:
+		g.emitGet(s)
+	case *ast.SeekStatement:
+		g.emitSeek(s)
 	case *ast.LocateStatement:
 		g.emitLocate(s)
 	case *ast.ClsStatement:
 		g.writeLine("fmt.Print(rt.AnsiCls()) // CLS")
+	case *ast.ScreenStatement:
+		g.writeLinef("rt.ScreenMode(int(%s))", g.emitExpr(s.Mode))
 	case *ast.ColorStatement:
 		g.emitColor(s)
+	case *ast.CircleStmt:
+		g.emitCircle(s)
+	case *ast.LineStmt:
+		g.emitLine(s)
+	case *ast.PsetStatement:
+		g.emitPset(s)
+	case *ast.PaintStmt:
+		g.emitPaint(s)
+	case *ast.DrawStmt:
+		g.writeLinef("rt.Draw(%s)", g.emitExpr(s.CommandString))
+	case *ast.ViewStatement:
+		g.emitView(s)
 	case *ast.OnErrorGotoStatement:
-		g.writeLinef("// TODO: ON ERROR GOTO %s", s.Target)
+		g.needErrState = true
+		if s.Target == "0" || s.Target == "" {
+			g.writeLine("errState.SetHandler(\"\") // ON ERROR GOTO 0 — disable error trapping")
+		} else {
+			g.writeLinef("errState.SetHandler(\"%s\") // ON ERROR GOTO %s", g.labelName(s.Target), s.Target)
+		}
 	case *ast.OnComputedGotoStatement:
 		g.emitOnComputedGoto(s)
 	case *ast.OnComputedGosubStatement:
@@ -464,12 +742,30 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 	case *ast.TypeBlockStatement:
 		g.emitTypeBlock(s)
 	case *ast.FnAssignStatement:
-		g.writeLinef("_fn_%s = %s", mangleName(s.Name), g.emitExpr(s.Value))
+		if g.inDefFn {
+			g.writeLinef("return %s(%s)", g.defFnReturnType, g.emitExpr(s.Value))
+		} else {
+			g.writeLinef("_fn_%s = %s", mangleName(s.Name), g.emitExpr(s.Value))
+		}
 	case *ast.FieldAssignStatement:
 		// Struct/TYPE field assignment: obj.Field = value
 		g.writeLinef("%s.%s = %s", g.emitExpr(s.Object), mangleName(s.Field), g.emitExpr(s.Value))
 	case *ast.ResumeStatement:
-		g.writeLinef("// TODO: RESUME %s", s.Type)
+		g.needErrState = true
+		switch s.Type {
+		case "NEXT":
+			g.writeLine("errState.ClearError() // RESUME NEXT — clear error and continue")
+		case "":
+			g.writeLine("errState.ClearError() // RESUME — clear error and continue (stub: no retry)")
+		default:
+			// RESUME <label> — clear error and jump to label
+			g.writeLinef("errState.ClearError() // RESUME %s", s.Type)
+			g.writeLinef("goto %s", g.labelName(s.Type))
+		}
+	case *ast.PlayStatement:
+		g.writeLinef("rt.Play(%s)", g.emitExpr(s.CommandString))
+	case *ast.SoundStatement:
+		g.writeLinef("rt.Sound(float64(%s), float64(%s))", g.emitExpr(s.Frequency), g.emitExpr(s.Duration))
 	case *ast.ErrorStatement:
 		g.writeLinef("// TODO: ERROR %s", g.emitExpr(s.Code))
 
@@ -599,15 +895,9 @@ func (g *CodeGenerator) emitPrintUsing(s *ast.PrintStatement) {
 func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 	upperName := strings.ToUpper(s.Name.Name)
 
-	// RANDOMIZE is parsed as a LetStatement by the parser.
-	// Translate to an RNG seed call instead of a variable assignment.
-	if upperName == "RANDOMIZE" {
-		g.needRng = true
-		if s.Value != nil {
-			g.writeLinef("rng.Randomize(float64(%s))", g.emitExpr(s.Value))
-		} else {
-			g.writeLine("rng.Randomize(rt.Timer())")
-		}
+	// Inside a multi-line DEF FN, assignments to the function name become return statements.
+	if g.inDefFn && strings.EqualFold(s.Name.Name+s.Name.TypeSuffix, g.defFnName) {
+		g.writeLinef("return %s(%s)", g.defFnReturnType, g.emitExpr(s.Value))
 		return
 	}
 
@@ -653,6 +943,20 @@ func (g *CodeGenerator) emitLet(s *ast.LetStatement) {
 }
 
 // ---------------------------------------------------------------------------
+// RANDOMIZE
+// ---------------------------------------------------------------------------
+
+func (g *CodeGenerator) emitRandomize(s *ast.RandomizeStatement) {
+	g.needRng = true
+	if s.Seed != nil {
+		seed := g.emitExpr(s.Seed)
+		g.writeLinef("rng.Randomize(float64(%s))", seed)
+	} else {
+		g.writeLine("rng.Randomize(rt.Timer())")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Array assignment
 // ---------------------------------------------------------------------------
 
@@ -669,8 +973,13 @@ func (g *CodeGenerator) emitArrayAssignment(s *ast.ArrayAssignment) {
 	if len(indices) == 1 {
 		g.writeLinef("%s[int(%s)] = %s(%s)", arrName, indices[0], elemType, val)
 	} else {
-		// Multi-dimensional: emit a comment and the first index for now.
-		g.writeLinef("// TODO: multi-dim array assignment %s[%s] = %s", arrName, strings.Join(indices, "]["), val)
+		// Multi-dimensional: emit chained bracket access for assignment.
+		var accessBuf strings.Builder
+		accessBuf.WriteString(arrName)
+		for _, idx := range indices {
+			accessBuf.WriteString(fmt.Sprintf("[int(%s)]", idx))
+		}
+		g.writeLinef("%s = %s(%s)", accessBuf.String(), elemType, val)
 	}
 }
 
@@ -937,31 +1246,121 @@ func (g *CodeGenerator) emitDim(s *ast.DimStatement) {
 		if len(d.Dimensions) == 0 {
 			// Scalar declaration.
 			goT := g.goTypeForDecl(d)
-			g.writeLinef("var %s %s", name, goT)
+			if !g.declared[name] {
+				g.writeLinef("var %s %s", name, goT)
+			}
 			g.declared[name] = true
 		} else if len(d.Dimensions) == 1 {
 			// 1-D array.
 			goT := g.goTypeForDecl(d)
 			upper := g.emitExpr(d.Dimensions[0].Upper)
-			g.writeLinef("%s := make([]%s, int(%s)+1)", name, goT, upper)
+			if g.declared[name] {
+				// Variable already hoisted; use assignment instead of short declaration.
+				g.writeLinef("%s = make([]%s, int(%s)+1)", name, goT, upper)
+			} else {
+				g.writeLinef("%s := make([]%s, int(%s)+1)", name, goT, upper)
+			}
 			g.declared[name] = true
+			g.arrayDims[name] = 1
 		} else {
-			// Multi-dimensional: emit as slice of slices or TODO.
-			goT := g.goTypeForDecl(d)
-			upper := g.emitExpr(d.Dimensions[0].Upper)
-			g.writeLinef("%s := make([]%s, int(%s)+1) // TODO: multi-dim", name, goT, upper)
-			g.declared[name] = true
+			// Multi-dimensional: emit slice-of-slices with nested init loops.
+			g.emitMultiDimArray(name, d)
 		}
 	}
+}
+
+// emitMultiDimArray emits a multi-dimensional array as nested slices.
+// For example, DIM A(10, 20) becomes:
+//
+//	A := make([][]float32, 11)
+//	for i_ := range A { A[i_] = make([]float32, 21) }
+//
+// DIM B(5, 10, 3) becomes:
+//
+//	B := make([][][]float32, 6)
+//	for i_ := range B { B[i_] = make([][]float32, 11); for j_ := range B[i_] { B[i_][j_] = make([]float32, 4) } }
+func (g *CodeGenerator) emitMultiDimArray(name string, d ast.DimDecl) {
+	ndim := len(d.Dimensions)
+	goT := g.goTypeForDecl(d)
+
+	// Build the slice-of-slices type prefix: e.g. "[][]" for 2D, "[][][]" for 3D.
+	slicePrefix := strings.Repeat("[]", ndim)
+
+	// Outermost make: e.g. make([][]float32, 11)
+	upper0 := g.emitExpr(d.Dimensions[0].Upper)
+	outerType := slicePrefix + goT // e.g. "[][][]float32" for 3D — but outermost make uses "[]" of inner type
+	// Actually the outermost make type is slicePrefix + goT but we need the full nesting.
+	// For 2D: make([][]float32, N)  — the outer type is [][]float32
+	// For 3D: make([][][]float32, N)
+	assign := ":="
+	if g.declared[name] {
+		assign = "="
+	}
+	g.writeLinef("%s %s make(%s, int(%s)+1)", name, assign, outerType, upper0)
+	g.declared[name] = true
+	g.arrayDims[name] = ndim
+
+	// Now emit the nested initialization loops.
+	// For 2D (dims=[d0, d1]):
+	//   for i_ := range A { A[i_] = make([]float32, int(d1)+1) }
+	// For 3D (dims=[d0, d1, d2]):
+	//   for i_ := range A { A[i_] = make([][]float32, int(d1)+1); for j_ := range A[i_] { A[i_][j_] = make([]float32, int(d2)+1) } }
+	loopVars := []string{"i_", "j_", "k_", "l_", "m_"}
+	if ndim-1 > len(loopVars) {
+		// Fallback for very high dimensions (unlikely in BASIC).
+		for extra := len(loopVars); extra < ndim-1; extra++ {
+			loopVars = append(loopVars, fmt.Sprintf("idx%d_", extra))
+		}
+	}
+
+	// Build a single line with nested for loops.
+	var line strings.Builder
+	for dim := 1; dim < ndim; dim++ {
+		lv := loopVars[dim-1]
+
+		// Build the accessor chain: A[i_][j_]...
+		accessor := name
+		for d := 0; d < dim; d++ {
+			accessor += fmt.Sprintf("[%s]", loopVars[d])
+		}
+
+		// The range target is the parent: A (for dim=1), A[i_] (for dim=2), etc.
+		rangeTarget := name
+		for d := 0; d < dim-1; d++ {
+			rangeTarget += fmt.Sprintf("[%s]", loopVars[d])
+		}
+
+		// The make type: remaining []'s + goT
+		remainingSlices := strings.Repeat("[]", ndim-dim)
+		makeType := remainingSlices + goT
+		upper := g.emitExpr(d.Dimensions[dim].Upper)
+
+		if dim > 1 {
+			line.WriteString("; ")
+		}
+		line.WriteString(fmt.Sprintf("for %s := range %s { %s = make(%s, int(%s)+1)", lv, rangeTarget, accessor, makeType, upper))
+	}
+	// Close all the braces.
+	for dim := ndim - 1; dim >= 1; dim-- {
+		line.WriteString(" }")
+	}
+
+	g.writeLine(line.String())
 }
 
 func (g *CodeGenerator) emitRedim(s *ast.RedimStatement) {
 	for _, d := range s.Declarations {
 		name := mangleName(d.Name + d.TypeSuffix)
-		if len(d.Dimensions) >= 1 {
+		if len(d.Dimensions) == 1 {
 			goT := g.goTypeForDecl(d)
 			upper := g.emitExpr(d.Dimensions[0].Upper)
 			g.writeLinef("%s = make([]%s, int(%s)+1) // REDIM", name, goT, upper)
+			g.arrayDims[name] = 1
+		} else if len(d.Dimensions) > 1 {
+			// Multi-dimensional REDIM: reuse the same slice-of-slices emitter.
+			// Force assignment (not short decl) since REDIM implies the var exists.
+			g.declared[name] = true
+			g.emitMultiDimArray(name, d)
 		}
 	}
 }
@@ -1002,7 +1401,7 @@ func (g *CodeGenerator) emitRead(s *ast.ReadStatement) {
 }
 
 // emitInputFromStdin emits stdin-reading code for INPUT and LINE INPUT statements.
-// INPUT reads whitespace-delimited values; LINE INPUT reads the whole line.
+// INPUT reads a comma-separated line from stdin; LINE INPUT reads the whole line.
 func (g *CodeGenerator) emitInputFromStdin(s *ast.ReadStatement) {
 	g.imports["fmt"] = true
 
@@ -1013,7 +1412,6 @@ func (g *CodeGenerator) emitInputFromStdin(s *ast.ReadStatement) {
 
 	if s.IsLineInput {
 		// LINE INPUT: read entire line into a single string variable.
-		g.imports["os"] = true
 		if len(s.Variables) > 0 {
 			varExpr := g.emitExpr(s.Variables[0])
 			if ident, ok := s.Variables[0].(*ast.Identifier); ok {
@@ -1029,8 +1427,10 @@ func (g *CodeGenerator) emitInputFromStdin(s *ast.ReadStatement) {
 		return
 	}
 
-	// Regular INPUT: read one or more values.
-	for _, v := range s.Variables {
+	// Regular INPUT: read one comma-separated line, then assign parts to variables.
+	if len(s.Variables) == 1 {
+		// Single variable: read directly.
+		v := s.Variables[0]
 		varExpr := g.emitExpr(v)
 		if ident, ok := v.(*ast.Identifier); ok {
 			name := mangleName(ident.Name + ident.TypeSuffix)
@@ -1043,10 +1443,41 @@ func (g *CodeGenerator) emitInputFromStdin(s *ast.ReadStatement) {
 				g.writeLine("{ scanner_ := rt.NewScanner(); scanner_.Scan()")
 				g.writeLinef("  %s = scanner_.Text() }", varExpr)
 			} else {
-				g.writeLinef("fmt.Scan(&%s)", varExpr)
+				g.writeLine("{ scanner_ := rt.NewScanner(); scanner_.Scan()")
+				goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+				g.writeLinef("  %s = %s(rt.Val(scanner_.Text())) }", varExpr, goT)
+			}
+		}
+		return
+	}
+
+	// Multiple variables: read one line, split by comma, assign parts.
+	// Ensure all variables are declared first.
+	for _, v := range s.Variables {
+		if ident, ok := v.(*ast.Identifier); ok {
+			name := mangleName(ident.Name + ident.TypeSuffix)
+			if !g.declared[name] {
+				goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+				g.writeLinef("var %s %s", name, goT)
+				g.declared[name] = true
 			}
 		}
 	}
+
+	g.writeLine("{")
+	g.writeLinef("  parts_ := rt.InputSplitLine()")
+	for i, v := range s.Variables {
+		varExpr := g.emitExpr(v)
+		if ident, ok := v.(*ast.Identifier); ok {
+			if isStringType(ident.Name + ident.TypeSuffix) {
+				g.writeLinef("  if len(parts_) > %d { %s = parts_[%d] }", i, varExpr, i)
+			} else {
+				goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+				g.writeLinef("  if len(parts_) > %d { %s = %s(rt.Val(parts_[%d])) }", i, varExpr, goT, i)
+			}
+		}
+	}
+	g.writeLine("}")
 }
 
 func (g *CodeGenerator) emitRestore(_ *ast.RestoreStatement) {
@@ -1107,9 +1538,15 @@ func (g *CodeGenerator) emitExit(s *ast.ExitStatement) {
 	case "FOR", "DO", "WHILE", "LOOP":
 		// LOOP is an alias for DO in Turbo BASIC (EXIT LOOP = exit DO loop)
 		g.writeLine("break")
-	case "SUB", "FUNCTION", "DEF":
-		// EXIT DEF exits a DEF FN multi-line function (equivalent to return)
+	case "SUB", "FUNCTION":
 		g.writeLine("return")
+	case "DEF":
+		// EXIT DEF exits a DEF FN multi-line function (equivalent to return)
+		if g.inDefFn {
+			g.writeLinef("return %s", zeroValueForType(g.defFnReturnType))
+		} else {
+			g.writeLine("return")
+		}
 	default:
 		g.writeLinef("// EXIT %s (unsupported)", s.ExitType)
 	}
@@ -1161,6 +1598,7 @@ func (g *CodeGenerator) emitErase(s *ast.EraseStatement) {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitOpen(s *ast.OpenStatement) {
+	g.needFileManager = true
 	filename := g.emitExpr(s.Filename)
 	fileNum := g.emitExpr(s.FileNum)
 	mode := strings.ToUpper(s.Mode)
@@ -1181,19 +1619,153 @@ func (g *CodeGenerator) emitOpen(s *ast.OpenStatement) {
 	if s.RecLen != nil {
 		recLen = g.emitExpr(s.RecLen)
 	}
-	g.writeLinef("// TODO: declare fm *rt.FileManager if not done")
-	g.writeLinef("_ = %s; _ = %s; _ = %s; _ = %s // OPEN", filename, modeConst, fileNum, recLen)
+	g.writeLinef("fm.FileOpen(int(%s), string(%s), %s, int(%s))", fileNum, filename, modeConst, recLen)
 }
 
 func (g *CodeGenerator) emitClose(s *ast.CloseStatement) {
+	g.needFileManager = true
 	if len(s.FileNums) == 0 {
-		g.writeLine("// TODO: fm.FileCloseAll() // CLOSE all")
+		g.writeLine("fm.FileCloseAll()")
 	} else {
 		for _, f := range s.FileNums {
 			num := g.emitExpr(f)
-			g.writeLinef("_ = %s // CLOSE #", num)
+			g.writeLinef("fm.FileClose(int(%s))", num)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// File I/O: PRINT#, INPUT#, WRITE#, FIELD, LSET, RSET, PUT, GET, SEEK
+// ---------------------------------------------------------------------------
+
+func (g *CodeGenerator) emitFilePrint(s *ast.FilePrintStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+
+	if len(s.Expressions) == 0 {
+		g.writeLinef("fm.FilePrint(int(%s))", fileNum)
+		return
+	}
+
+	parts := make([]string, 0, len(s.Expressions))
+	for _, expr := range s.Expressions {
+		parts = append(parts, fmt.Sprintf("fmt.Sprint(%s)", g.emitExpr(expr)))
+	}
+	g.writeLinef("fm.FilePrint(int(%s), %s)", fileNum, strings.Join(parts, ", "))
+}
+
+func (g *CodeGenerator) emitFileInput(s *ast.FileInputStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+
+	for _, v := range s.Variables {
+		varName := g.emitExpr(v)
+		if s.IsLineInput {
+			g.writeLine("{")
+			g.indent++
+			g.writeLinef("val_, err_ := fm.FileLineInput(int(%s))", fileNum)
+			g.writeLine("_ = err_")
+			// Determine if the variable is a string type
+			if g.isStringExpr(v) {
+				g.writeLinef("%s = val_", varName)
+			} else {
+				g.imports["strconv"] = true
+				g.writeLinef("{ n_, err2_ := strconv.ParseFloat(val_, 64); _ = err2_; %s = %s(n_) }", varName, g.goTypeForExpr(v))
+			}
+			g.indent--
+			g.writeLine("}")
+		} else {
+			g.writeLine("{")
+			g.indent++
+			g.writeLinef("val_, err_ := fm.FileInput(int(%s))", fileNum)
+			g.writeLine("_ = err_")
+			if g.isStringExpr(v) {
+				g.writeLinef("%s = val_", varName)
+			} else {
+				g.imports["strconv"] = true
+				g.imports["strings"] = true
+				g.writeLinef("{ n_, err2_ := strconv.ParseFloat(strings.TrimSpace(val_), 64); _ = err2_; %s = %s(n_) }", varName, g.goTypeForExpr(v))
+			}
+			g.indent--
+			g.writeLine("}")
+		}
+	}
+}
+
+func (g *CodeGenerator) emitFileWrite(s *ast.FileWriteStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+
+	parts := make([]string, 0, len(s.Expressions))
+	for _, expr := range s.Expressions {
+		parts = append(parts, g.emitExpr(expr))
+	}
+
+	if len(parts) == 0 {
+		g.writeLinef("fm.FileWrite(int(%s))", fileNum)
+	} else {
+		g.writeLinef("fm.FileWrite(int(%s), %s)", fileNum, strings.Join(parts, ", "))
+	}
+}
+
+func (g *CodeGenerator) emitField(s *ast.FieldStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+
+	g.writeLinef("fm.Field(int(%s), []rt.FieldDef{", fileNum)
+	g.indent++
+	for _, f := range s.Fields {
+		length := g.emitExpr(f.Length)
+		// Strip the $ suffix from the variable name for the field name
+		fieldName := strings.TrimSuffix(f.VarName, "$")
+		g.writeLinef("{Name: %q, Length: int(%s)},", fieldName, length)
+	}
+	g.indent--
+	g.writeLine("})")
+}
+
+func (g *CodeGenerator) emitLset(s *ast.LsetStatement) {
+	g.needFileManager = true
+	// LSET operates on a FIELD variable. We need to find which file number
+	// the variable belongs to. For simplicity, we pass the variable name
+	// and let the runtime search all open files.
+	varName := strings.TrimSuffix(s.Variable, "$")
+	value := g.emitExpr(s.Value)
+	g.writeLinef("fm.Lset(0, %q, string(%s)) // LSET %s", varName, value, s.Variable)
+}
+
+func (g *CodeGenerator) emitRset(s *ast.RsetStatement) {
+	g.needFileManager = true
+	varName := strings.TrimSuffix(s.Variable, "$")
+	value := g.emitExpr(s.Value)
+	g.writeLinef("fm.Rset(0, %q, string(%s)) // RSET %s", varName, value, s.Variable)
+}
+
+func (g *CodeGenerator) emitPut(s *ast.PutStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+	rec := "1"
+	if s.RecordOrPos != nil {
+		rec = g.emitExpr(s.RecordOrPos)
+	}
+	g.writeLinef("fm.RandomPut(int(%s), int(%s))", fileNum, rec)
+}
+
+func (g *CodeGenerator) emitGet(s *ast.GetStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+	rec := "1"
+	if s.RecordOrPos != nil {
+		rec = g.emitExpr(s.RecordOrPos)
+	}
+	g.writeLinef("fm.RandomGet(int(%s), int(%s))", fileNum, rec)
+}
+
+func (g *CodeGenerator) emitSeek(s *ast.SeekStatement) {
+	g.needFileManager = true
+	fileNum := g.emitExpr(s.FileNum)
+	pos := g.emitExpr(s.Position)
+	g.writeLinef("fm.FileSeek(int(%s), int64(%s))", fileNum, pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,6 +1794,119 @@ func (g *CodeGenerator) emitColor(s *ast.ColorStatement) {
 		bg = g.emitExpr(s.Background)
 	}
 	g.writeLinef("fmt.Print(rt.AnsiColor(int(%s), int(%s)))", fg, bg)
+}
+
+// ---------------------------------------------------------------------------
+// Graphics drawing commands: CIRCLE, LINE, PSET, PAINT, VIEW
+// ---------------------------------------------------------------------------
+
+func (g *CodeGenerator) emitCircle(s *ast.CircleStmt) {
+	x := g.emitExpr(s.X)
+	y := g.emitExpr(s.Y)
+	radius := g.emitExpr(s.Radius)
+	color := "15"
+	if s.Color != nil {
+		color = g.emitExpr(s.Color)
+	}
+	start := "0"
+	if s.Start != nil {
+		start = g.emitExpr(s.Start)
+	}
+	end := "0"
+	if s.End != nil {
+		end = g.emitExpr(s.End)
+	}
+	aspect := "1"
+	if s.Aspect != nil {
+		aspect = g.emitExpr(s.Aspect)
+	}
+	g.writeLinef("rt.Circle(float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), float64(%s))",
+		x, y, radius, color, start, end, aspect)
+}
+
+func (g *CodeGenerator) emitLine(s *ast.LineStmt) {
+	x1 := "0"
+	y1 := "0"
+	if s.X1 != nil {
+		x1 = g.emitExpr(s.X1)
+	}
+	if s.Y1 != nil {
+		y1 = g.emitExpr(s.Y1)
+	}
+	x2 := g.emitExpr(s.X2)
+	y2 := g.emitExpr(s.Y2)
+	color := "15"
+	if s.Color != nil {
+		color = g.emitExpr(s.Color)
+	}
+	boxMode := strconv.Quote(s.BoxMode)
+	g.writeLinef("rt.DrawLine(float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), %s)",
+		x1, y1, x2, y2, color, boxMode)
+}
+
+func (g *CodeGenerator) emitPset(s *ast.PsetStatement) {
+	x := g.emitExpr(s.X)
+	y := g.emitExpr(s.Y)
+	color := "15"
+	if s.Color != nil {
+		color = g.emitExpr(s.Color)
+	}
+	g.writeLinef("rt.Pset(float64(%s), float64(%s), float64(%s))", x, y, color)
+}
+
+func (g *CodeGenerator) emitPaint(s *ast.PaintStmt) {
+	x := g.emitExpr(s.X)
+	y := g.emitExpr(s.Y)
+	fillColor := "15"
+	if s.FillColor != nil {
+		fillColor = g.emitExpr(s.FillColor)
+	}
+	borderColor := fillColor
+	if s.BorderColor != nil {
+		borderColor = g.emitExpr(s.BorderColor)
+	}
+	g.writeLinef("rt.Paint(float64(%s), float64(%s), float64(%s), float64(%s))", x, y, fillColor, borderColor)
+}
+
+func (g *CodeGenerator) emitView(s *ast.ViewStatement) {
+	if s.IsPrint {
+		top := "1"
+		bottom := "25"
+		if s.Top != nil {
+			top = g.emitExpr(s.Top)
+		}
+		if s.Bottom != nil {
+			bottom = g.emitExpr(s.Bottom)
+		}
+		g.writeLinef("rt.ViewPrint(float64(%s), float64(%s))", top, bottom)
+		return
+	}
+	x1 := "0"
+	y1 := "0"
+	x2 := "0"
+	y2 := "0"
+	if s.X1 != nil {
+		x1 = g.emitExpr(s.X1)
+	}
+	if s.Y1 != nil {
+		y1 = g.emitExpr(s.Y1)
+	}
+	if s.X2 != nil {
+		x2 = g.emitExpr(s.X2)
+	}
+	if s.Y2 != nil {
+		y2 = g.emitExpr(s.Y2)
+	}
+	fillColor := "0"
+	if s.FillColor != nil {
+		fillColor = g.emitExpr(s.FillColor)
+	}
+	borderColor := "0"
+	if s.BorderColor != nil {
+		borderColor = g.emitExpr(s.BorderColor)
+	}
+	g.writeLinef("rt.ViewPort(float64(%s), float64(%s), float64(%s), float64(%s), float64(%s), float64(%s))",
+		x1, y1, x2, y2, fillColor, borderColor)
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,17 +1946,32 @@ func (g *CodeGenerator) emitSubDecl(s *ast.SubDeclaration) {
 	name := mangleName(s.Name)
 	params := g.emitParams(s.Params)
 	g.funcWriteLinef(0, "func %s(%s) {", name, params)
-	// Save and restore state.
+	// Save and restore state — including the declared map so SUBs get their own scope.
 	origBuf := g.buf
 	origIndent := g.indent
+	origDeclared := g.declared
+	origInSub := g.inSubOrFunc
 	g.buf = bytes.Buffer{}
 	g.indent = 1
+	g.inSubOrFunc = true
+	// Fresh declared map for the SUB scope. Pre-populate with:
+	// - shared/package-level variables (already declared at package level)
+	// - parameters
+	g.declared = make(map[string]bool)
+	for k := range g.sharedVars {
+		g.declared[k] = true
+	}
+	for _, p := range s.Params {
+		g.declared[mangleName(p.Name)] = true
+	}
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
 	}
 	g.funcBuf.Write(g.buf.Bytes())
 	g.buf = origBuf
 	g.indent = origIndent
+	g.declared = origDeclared
+	g.inSubOrFunc = origInSub
 	g.funcWriteLine(0, "}")
 	g.funcWriteLine(0, "")
 }
@@ -1288,16 +1988,34 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 	g.funcWriteLinef(0, "func %s(%s) %s {", name, params, retType)
 	g.funcWriteLinef(1, "var %s %s", retVar, retType)
 
+	// Save and restore state — including the declared map so FUNCTIONs get their own scope.
 	origBuf := g.buf
 	origIndent := g.indent
+	origDeclared := g.declared
+	origInSub := g.inSubOrFunc
 	g.buf = bytes.Buffer{}
 	g.indent = 1
+	g.inSubOrFunc = true
+	// Fresh declared map for the FUNCTION scope. Pre-populate with:
+	// - shared/package-level variables (already declared at package level)
+	// - parameters
+	// - the return variable (just declared above)
+	g.declared = make(map[string]bool)
+	for k := range g.sharedVars {
+		g.declared[k] = true
+	}
+	for _, p := range s.Params {
+		g.declared[mangleName(p.Name)] = true
+	}
+	g.declared[retVar] = true
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
 	}
 	g.funcBuf.Write(g.buf.Bytes())
 	g.buf = origBuf
 	g.indent = origIndent
+	g.declared = origDeclared
+	g.inSubOrFunc = origInSub
 
 	g.funcWriteLinef(1, "return %s", retVar)
 	g.funcWriteLine(0, "}")
@@ -1307,30 +2025,38 @@ func (g *CodeGenerator) emitFuncDecl(s *ast.FunctionDeclaration) {
 func (g *CodeGenerator) emitDefFn(s *ast.DefFnDeclaration) {
 	name := mangleName(s.Name)
 	params := g.emitParams(s.Params)
+	retType := g.goTypeForIdent(s.Name)
 
 	if s.SingleLineExpr != nil {
-		retType := "float64" // DEF FN default return type
 		g.funcWriteLinef(0, "func %s(%s) %s {", name, params, retType)
 		expr := g.emitExpr(s.SingleLineExpr)
-		g.funcWriteLinef(1, "return %s", expr)
+		g.funcWriteLinef(1, "return %s(%s)", retType, expr)
 		g.funcWriteLine(0, "}")
 		g.funcWriteLine(0, "")
 	} else {
-		g.funcWriteLinef(0, "func %s(%s) float64 {", name, params)
-		g.funcWriteLinef(1, "var result_ float64")
+		g.funcWriteLinef(0, "func %s(%s) %s {", name, params, retType)
 
 		origBuf := g.buf
 		origIndent := g.indent
+		origInDefFn := g.inDefFn
+		origDefFnReturnType := g.defFnReturnType
+		origDefFnName := g.defFnName
 		g.buf = bytes.Buffer{}
 		g.indent = 1
+		g.inDefFn = true
+		g.defFnReturnType = retType
+		g.defFnName = s.Name
 		for _, stmt := range s.Body {
 			g.emitStatement(stmt)
 		}
 		g.funcBuf.Write(g.buf.Bytes())
 		g.buf = origBuf
 		g.indent = origIndent
+		g.inDefFn = origInDefFn
+		g.defFnReturnType = origDefFnReturnType
+		g.defFnName = origDefFnName
 
-		g.funcWriteLinef(1, "return result_")
+		g.funcWriteLinef(1, "return %s", zeroValueForType(retType))
 		g.funcWriteLine(0, "}")
 		g.funcWriteLine(0, "")
 	}
@@ -1423,6 +2149,12 @@ func (g *CodeGenerator) emitIdentifier(id *ast.Identifier) string {
 	case "RND":
 		g.needRng = true
 		return "rng.Rnd(1)"
+	case "ERR":
+		g.needErrState = true
+		return "float64(errState.Err())"
+	case "ERL":
+		g.needErrState = true
+		return "float64(errState.Erl())"
 	case "ERADR":
 		return "float64(0) /* ERADR: not applicable in transpiled code */"
 	case "TIMER":
@@ -1442,8 +2174,10 @@ func (g *CodeGenerator) emitBinaryExpr(e *ast.BinaryExpr) string {
 
 	switch op {
 	case "+", "-", "*":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s %s %s)", left, e.Operator, right)
 	case "/":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s / %s)", left, right)
 	case "\\":
 		// Integer division.
@@ -1454,16 +2188,22 @@ func (g *CodeGenerator) emitBinaryExpr(e *ast.BinaryExpr) string {
 		g.imports["math"] = true
 		return fmt.Sprintf("math.Pow(%s, %s)", left, right)
 	case "=":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s == %s)", left, right)
 	case "<>", "><":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s != %s)", left, right)
 	case "<":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s < %s)", left, right)
 	case ">":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s > %s)", left, right)
 	case "<=", "=<":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s <= %s)", left, right)
 	case ">=", "=>":
+		left, right = g.promoteNumericPair(e.Left, e.Right, left, right)
 		return fmt.Sprintf("(%s >= %s)", left, right)
 	case "AND":
 		return fmt.Sprintf("(int(%s) & int(%s))", left, right)
@@ -1478,6 +2218,67 @@ func (g *CodeGenerator) emitBinaryExpr(e *ast.BinaryExpr) string {
 	default:
 		return fmt.Sprintf("(%s /* %s */ %s)", left, op, right)
 	}
+}
+
+// promoteNumericPair inspects the Go types of left and right AST expressions
+// and, when they differ and both are numeric, wraps the narrower one in an
+// explicit cast to the wider type.  This prevents Go "mismatched types" errors
+// such as "invalid operation: float32 + float64".
+//
+// String operands (concatenation with +) are left untouched.
+// Untyped numeric literals (NumberLiteral without a suffix) are also left
+// untouched because Go untyped constants convert automatically at the use site.
+func (g *CodeGenerator) promoteNumericPair(
+	leftExpr, rightExpr ast.Expression,
+	leftStr, rightStr string,
+) (string, string) {
+	lt := g.goTypeForExpr(leftExpr)
+	rt := g.goTypeForExpr(rightExpr)
+
+	// If either side is string, skip — string concatenation needs no cast.
+	if lt == "string" || rt == "string" {
+		return leftStr, rightStr
+	}
+
+	// If types are the same, nothing to do.
+	if lt == rt {
+		return leftStr, rightStr
+	}
+
+	// Untyped NumberLiterals (NumType == NumSingle by default when no suffix)
+	// emit as plain untyped Go constants; Go coerces them automatically.
+	// We still need to handle the case where one side IS typed (identifier)
+	// and the other IS an untyped literal — the literal will coerce fine on
+	// its own, but when both are typed and different we must cast.
+	_, leftIsLiteral := leftExpr.(*ast.NumberLiteral)
+	_, rightIsLiteral := rightExpr.(*ast.NumberLiteral)
+
+	lw := numericWidth(lt)
+	rw := numericWidth(rt)
+
+	if lw < 0 || rw < 0 {
+		// Non-standard types — leave unchanged.
+		return leftStr, rightStr
+	}
+
+	wider := lt
+	if rw > lw {
+		wider = rt
+	}
+
+	if lw < rw {
+		// left is narrower — cast it unless it's an untyped literal
+		if !leftIsLiteral {
+			leftStr = fmt.Sprintf("%s(%s)", wider, leftStr)
+		}
+	} else {
+		// right is narrower — cast it unless it's an untyped literal
+		if !rightIsLiteral {
+			rightStr = fmt.Sprintf("%s(%s)", wider, rightStr)
+		}
+	}
+
+	return leftStr, rightStr
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,50 +2338,62 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 		args = append(args, g.emitExpr(a))
 	}
 
+	// castF64 wraps the emitted string for fc.Args[i] in float64(...) when the
+	// inferred Go type of that argument is not already float64.  This ensures
+	// that passing a float32 or int16 variable to a runtime function that
+	// accepts float64 does not cause a Go compilation error.
+	castF64 := func(i int) string {
+		s := g.argN(args, i)
+		if i < len(fc.Args) && g.goTypeForExpr(fc.Args[i]) == "float64" {
+			return s
+		}
+		return "float64(" + s + ")"
+	}
+
 	switch name {
 	// Math functions.
 	case "ABS":
-		return fmt.Sprintf("rt.Abs(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Abs(%s)", castF64(0))
 	case "SGN":
-		return fmt.Sprintf("rt.Sgn(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Sgn(%s)", castF64(0))
 	case "INT":
-		return fmt.Sprintf("rt.IntFloor(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.IntFloor(%s)", castF64(0))
 	case "FIX":
-		return fmt.Sprintf("rt.Fix(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Fix(%s)", castF64(0))
 	case "CEIL":
-		return fmt.Sprintf("rt.Ceil(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Ceil(%s)", castF64(0))
 	case "SQR":
-		return fmt.Sprintf("func() float64 { v_, _ := rt.Sqr(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() float64 { v_, _ := rt.Sqr(%s); return v_ }()", castF64(0))
 	case "EXP":
-		return fmt.Sprintf("rt.Exp(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Exp(%s)", castF64(0))
 	case "EXP2":
-		return fmt.Sprintf("rt.Exp2(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Exp2(%s)", castF64(0))
 	case "EXP10":
-		return fmt.Sprintf("rt.Exp10(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Exp10(%s)", castF64(0))
 	case "LOG":
-		return fmt.Sprintf("func() float64 { v_, _ := rt.Log(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() float64 { v_, _ := rt.Log(%s); return v_ }()", castF64(0))
 	case "LOG2":
-		return fmt.Sprintf("func() float64 { v_, _ := rt.Log2(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() float64 { v_, _ := rt.Log2(%s); return v_ }()", castF64(0))
 	case "LOG10":
-		return fmt.Sprintf("func() float64 { v_, _ := rt.Log10(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() float64 { v_, _ := rt.Log10(%s); return v_ }()", castF64(0))
 	case "SIN":
-		return fmt.Sprintf("rt.Sin(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Sin(%s)", castF64(0))
 	case "COS":
-		return fmt.Sprintf("rt.Cos(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Cos(%s)", castF64(0))
 	case "TAN":
-		return fmt.Sprintf("rt.Tan(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Tan(%s)", castF64(0))
 	case "ATN":
-		return fmt.Sprintf("rt.Atn(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Atn(%s)", castF64(0))
 
 	// Conversion functions.
 	case "CINT":
-		return fmt.Sprintf("func() int16 { v_, _ := rt.Cint(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() int16 { v_, _ := rt.Cint(%s); return v_ }()", castF64(0))
 	case "CLNG":
-		return fmt.Sprintf("func() int32 { v_, _ := rt.Clng(%s); return v_ }()", g.oneArg(args))
+		return fmt.Sprintf("func() int32 { v_, _ := rt.Clng(%s); return v_ }()", castF64(0))
 	case "CSNG":
-		return fmt.Sprintf("rt.Csng(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Csng(%s)", castF64(0))
 	case "CDBL":
-		return fmt.Sprintf("rt.Cdbl(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Cdbl(%s)", castF64(0))
 
 	// String functions.
 	case "LEFT$":
@@ -1604,7 +2417,7 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "CHR$":
 		return fmt.Sprintf("func() string { v_, _ := rt.Chr(int(%s)); return v_ }()", g.oneArg(args))
 	case "STR$":
-		return fmt.Sprintf("rt.Str(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Str(%s)", castF64(0))
 	case "VAL":
 		return fmt.Sprintf("rt.Val(%s)", g.oneArg(args))
 	case "HEX$":
@@ -1636,7 +2449,7 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "MKS$":
 		return fmt.Sprintf("rt.Mks(float32(%s))", g.oneArg(args))
 	case "MKD$":
-		return fmt.Sprintf("rt.Mkd(%s)", g.oneArg(args))
+		return fmt.Sprintf("rt.Mkd(%s)", castF64(0))
 	case "CVI":
 		return fmt.Sprintf("func() int16 { v_, _ := rt.Cvi(%s); return v_ }()", g.oneArg(args))
 	case "CVL":
@@ -1650,7 +2463,7 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 	case "RND":
 		g.needRng = true
 		if len(args) > 0 {
-			return fmt.Sprintf("rng.Rnd(%s)", args[0])
+			return fmt.Sprintf("rng.Rnd(%s)", castF64(0))
 		}
 		return "rng.Rnd(1)"
 
@@ -1671,6 +2484,28 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 		return fmt.Sprintf("rt.Spc(int(%s))", g.oneArg(args))
 	case "SPC":
 		return fmt.Sprintf("rt.Spc(int(%s))", g.oneArg(args))
+
+	// Memory / hardware stubs.
+	case "FRE":
+		if len(args) > 0 {
+			return fmt.Sprintf("rt.Fre(%s)", castF64(0))
+		}
+		return "rt.Fre(0)"
+	case "PEEK":
+		if len(args) > 0 {
+			return fmt.Sprintf("rt.Peek(%s)", castF64(0))
+		}
+		return "rt.Peek(0)"
+
+	// File EOF function.
+	case "EOF":
+		// EOF(filenum) returns -1 (true) or 0 (false) in BASIC.
+		// fm (FileManager) wiring is part of the File I/O epic (go-basic-7a4).
+		// Until fm is wired into the preamble, emit a stub returning 0 (not at EOF).
+		if len(args) > 0 {
+			return fmt.Sprintf("func() float64 { eofResult_, eofErr_ := fm.Eof(int(%s)); if eofErr_ == nil && eofResult_ { return -1 }; return 0 }()", args[0])
+		}
+		return "float64(0) /* EOF: no file number */"
 
 	default:
 		// User-defined function or unmapped built-in: call directly.
@@ -1703,6 +2538,25 @@ func (g *CodeGenerator) emitFunctionCall(fc *ast.FunctionCall) string {
 // ---------------------------------------------------------------------------
 
 func (g *CodeGenerator) emitArrayAccess(aa *ast.ArrayAccess) string {
+	// Check if this name resolves to a user-defined FUNCTION or SUB in the
+	// symbol table.  The parser cannot always distinguish a function call from
+	// an array access when there are no parenthesised DECLARE or DIM hints,
+	// so it may produce an ArrayAccess node for what is really a call site.
+	// Here we do a symbol-table lookup and, when the name is a function/sub,
+	// emit a proper Go function call instead of a slice index expression.
+	if g.table != nil {
+		if sym := g.table.Lookup(aa.Name); sym != nil {
+			if sym.Type == semantic.SymFunction || sym.Type == semantic.SymSub || sym.Type == semantic.SymDefFn {
+				mangledName := mangleName(aa.Name)
+				args := make([]string, 0, len(aa.Indices))
+				for _, idx := range aa.Indices {
+					args = append(args, g.emitExpr(idx))
+				}
+				return fmt.Sprintf("%s(%s)", mangledName, strings.Join(args, ", "))
+			}
+		}
+	}
+
 	name := mangleName(aa.Name + aa.TypeSuffix)
 	if len(aa.Indices) == 0 {
 		// No indices — array passed by reference (e.g., as a SUB parameter)
@@ -1712,12 +2566,13 @@ func (g *CodeGenerator) emitArrayAccess(aa *ast.ArrayAccess) string {
 		idx := g.emitExpr(aa.Indices[0])
 		return fmt.Sprintf("%s[int(%s)]", name, idx)
 	}
-	// Multi-dimensional: emit first index only with a TODO.
-	indices := make([]string, 0, len(aa.Indices))
+	// Multi-dimensional: emit chained bracket access, e.g. A[int(i)][int(j)]
+	var buf strings.Builder
+	buf.WriteString(name)
 	for _, idx := range aa.Indices {
-		indices = append(indices, g.emitExpr(idx))
+		buf.WriteString(fmt.Sprintf("[int(%s)]", g.emitExpr(idx)))
 	}
-	return fmt.Sprintf("%s[int(%s)] /* TODO: multi-dim [%s] */", name, indices[0], strings.Join(indices, ","))
+	return buf.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -1975,9 +2830,136 @@ func goTypeFromSuffix(name string) string {
 	}
 }
 
+// zeroValueForType returns the Go zero-value literal for a given Go type.
+func zeroValueForType(goT string) string {
+	if goT == "string" {
+		return `""`
+	}
+	return "0"
+}
+
 // isStringType returns true if the BASIC name denotes a string variable.
 func isStringType(name string) bool {
 	return len(name) > 0 && name[len(name)-1] == '$'
+}
+
+// isStringExpr returns true if the expression resolves to a string Go type.
+func (g *CodeGenerator) isStringExpr(expr ast.Expression) bool {
+	return g.goTypeForExpr(expr) == "string"
+}
+
+// ---------------------------------------------------------------------------
+// goTypeForExpr — infer Go type of an arbitrary AST expression
+// ---------------------------------------------------------------------------
+
+// numericWidth returns a numeric width rank for Go numeric type names.
+// Higher rank = wider type. Returns -1 for non-numeric types.
+func numericWidth(goTypeName string) int {
+	switch goTypeName {
+	case "int16":
+		return 0
+	case "int32":
+		return 1
+	case "float32":
+		return 2
+	case "float64":
+		return 3
+	default:
+		return -1 // non-numeric (e.g. string)
+	}
+}
+
+// widenType returns the wider of two Go numeric type names.
+// If both are the same, returns that type. If either is non-numeric, returns "float64".
+func widenType(a, b string) string {
+	wa := numericWidth(a)
+	wb := numericWidth(b)
+	if wa < 0 || wb < 0 {
+		return "float64"
+	}
+	if wa >= wb {
+		return a
+	}
+	return b
+}
+
+// goTypeForExpr infers the Go type string for an arbitrary AST expression.
+// It is used by emitBinaryExpr to detect type mismatches and emit the
+// necessary widening casts so Go accepts the generated code.
+func (g *CodeGenerator) goTypeForExpr(expr ast.Expression) string {
+	if expr == nil {
+		return "float64"
+	}
+	switch e := expr.(type) {
+	case *ast.NumberLiteral:
+		// Use the NumType annotation set by the parser/lexer.
+		switch e.NumType {
+		case ast.NumInt:
+			return "int16"
+		case ast.NumLong:
+			return "int32"
+		case ast.NumSingle:
+			return "float32"
+		case ast.NumDouble:
+			return "float64"
+		default:
+			// Untyped literal: use float64 if fractional, otherwise
+			// it's an untyped constant and causes no mismatch on its own.
+			// Return "float64" as the safe default so widening works.
+			return "float64"
+		}
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.Identifier:
+		return g.goTypeForIdent(e.Name + e.TypeSuffix)
+	case *ast.ArrayAccess:
+		return g.goTypeForIdent(e.Name + e.TypeSuffix)
+	case *ast.GroupExpr:
+		return g.goTypeForExpr(e.Inner)
+	case *ast.UnaryExpr:
+		return g.goTypeForExpr(e.Operand)
+	case *ast.BinaryExpr:
+		lt := g.goTypeForExpr(e.Left)
+		rt := g.goTypeForExpr(e.Right)
+		return widenType(lt, rt)
+	case *ast.FunctionCall:
+		return goTypeForBuiltin(strings.ToUpper(e.Name))
+	case *ast.FnCallExpression:
+		// DEF FN functions: infer from suffix of function name.
+		return g.goTypeForIdent(e.Name)
+	case *ast.FieldAccessExpression:
+		// Struct field: conservative default.
+		return "float64"
+	default:
+		return "float64"
+	}
+}
+
+// goTypeForBuiltin returns the Go return type of a known BASIC built-in function.
+func goTypeForBuiltin(name string) string {
+	switch name {
+	// Integer-returning functions.
+	case "LEN", "INSTR", "ASC", "PEEK":
+		return "int"
+	// int16-returning conversion functions.
+	case "CINT", "CVI":
+		return "int16"
+	// int32-returning conversion functions.
+	case "CLNG", "CVL":
+		return "int32"
+	// float32-returning conversion functions.
+	case "CSNG", "CVS":
+		return "float32"
+	// String-returning functions.
+	case "LEFT$", "RIGHT$", "MID$", "CHR$", "STR$", "HEX$", "OCT$", "BIN$",
+		"UCASE$", "LCASE$", "LTRIM$", "RTRIM$", "TRIM$", "SPACE$", "STRING$",
+		"MKI$", "MKL$", "MKS$", "MKD$", "DATE$", "TIME$", "INKEY$",
+		"COMMAND$", "ENVIRON$", "TAB", "SPC":
+		return "string"
+	// float64-returning functions (the vast majority).
+	default:
+		return "float64"
+	}
 }
 
 // ---------------------------------------------------------------------------

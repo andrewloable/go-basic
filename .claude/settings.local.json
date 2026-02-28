@@ -34,7 +34,14 @@
       "Bash(G:/projects/loabletech/go-basic/internal/ast/ast.go:*)",
       "Bash(./basicc_new transpile:*)",
       "Bash(ls:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(python3:*)",
+      "Bash(/Users/andrewloable/Projects/loabletech/go-basic/basicc_new transpile:*)",
+      "Bash(/tmp/test_transpile.go:*)",
+      "Bash(/tmp/typecast_test.bas:*)",
+      "Bash(/tmp/test_randomize.go:*)",
+      "Bash(grep:*)",
+      "Bash(/tmp/test_compile.go:*)"
     ]
   }
 }

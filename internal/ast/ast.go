@@ -1090,6 +1090,16 @@ func (n *FnAssignStatement) statementNode()       {}
 func (n *FnAssignStatement) TokenLiteral() string  { return "FN" }
 func (n *FnAssignStatement) Pos() Position         { return n.BasePos }
 
+// RandomizeStatement represents RANDOMIZE [seed]
+type RandomizeStatement struct {
+	BasePos Position
+	Seed    Expression // nil means RANDOMIZE with no arg (use timer)
+}
+
+func (s *RandomizeStatement) statementNode()       {}
+func (s *RandomizeStatement) TokenLiteral() string  { return "RANDOMIZE" }
+func (s *RandomizeStatement) Pos() Position         { return s.BasePos }
+
 // FnCallExpression represents FN name(args) in expression context.
 type FnCallExpression struct {
 	BasePos Position

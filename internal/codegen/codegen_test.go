@@ -569,6 +569,147 @@ func TestFunctionCallMappings(t *testing.T) {
 	}
 }
 
+// TestDollarSuffixedBuiltins verifies that CHR$, LEFT$, RIGHT$, MID$, HEX$,
+// OCT$, BIN$, STR$, STRING$, ENVIRON$, UCASE$, LCASE$, LTRIM$, RTRIM$, and
+// SPACE$ are emitted as runtime function calls (rt.*) and NOT as array accesses.
+func TestDollarSuffixedBuiltins(t *testing.T) {
+	tests := []struct {
+		name     string
+		funcName string
+		args     []ast.Expression
+		want     string
+	}{
+		{
+			name:     "CHR$",
+			funcName: "CHR$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 65, NumType: ast.NumInt}},
+			want:     "rt.Chr(",
+		},
+		{
+			name:     "LEFT$",
+			funcName: "LEFT$",
+			args: []ast.Expression{
+				&ast.StringLiteral{Value: "hello"},
+				&ast.NumberLiteral{Value: 3, NumType: ast.NumInt},
+			},
+			want: "rt.Left(",
+		},
+		{
+			name:     "RIGHT$",
+			funcName: "RIGHT$",
+			args: []ast.Expression{
+				&ast.StringLiteral{Value: "hello"},
+				&ast.NumberLiteral{Value: 3, NumType: ast.NumInt},
+			},
+			want: "rt.Right(",
+		},
+		{
+			name:     "MID$",
+			funcName: "MID$",
+			args: []ast.Expression{
+				&ast.StringLiteral{Value: "hello"},
+				&ast.NumberLiteral{Value: 2, NumType: ast.NumInt},
+				&ast.NumberLiteral{Value: 3, NumType: ast.NumInt},
+			},
+			want: "rt.Mid(",
+		},
+		{
+			name:     "HEX$",
+			funcName: "HEX$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 255, NumType: ast.NumInt}},
+			want:     "rt.Hex(",
+		},
+		{
+			name:     "OCT$",
+			funcName: "OCT$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 8, NumType: ast.NumInt}},
+			want:     "rt.Oct(",
+		},
+		{
+			name:     "BIN$",
+			funcName: "BIN$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 5, NumType: ast.NumInt}},
+			want:     "rt.Bin(",
+		},
+		{
+			name:     "STR$",
+			funcName: "STR$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 42, NumType: ast.NumInt}},
+			want:     "rt.Str(",
+		},
+		{
+			name:     "STRING$",
+			funcName: "STRING$",
+			args: []ast.Expression{
+				&ast.NumberLiteral{Value: 3, NumType: ast.NumInt},
+				&ast.NumberLiteral{Value: 42, NumType: ast.NumInt},
+			},
+			want: "rt.StringRepeat(",
+		},
+		{
+			name:     "ENVIRON$",
+			funcName: "ENVIRON$",
+			args:     []ast.Expression{&ast.StringLiteral{Value: "PATH"}},
+			want:     "rt.EnvironGet(",
+		},
+		{
+			name:     "UCASE$",
+			funcName: "UCASE$",
+			args:     []ast.Expression{&ast.StringLiteral{Value: "hello"}},
+			want:     "rt.UCase(",
+		},
+		{
+			name:     "LCASE$",
+			funcName: "LCASE$",
+			args:     []ast.Expression{&ast.StringLiteral{Value: "HELLO"}},
+			want:     "rt.LCase(",
+		},
+		{
+			name:     "LTRIM$",
+			funcName: "LTRIM$",
+			args:     []ast.Expression{&ast.StringLiteral{Value: "  hi"}},
+			want:     "rt.LTrim(",
+		},
+		{
+			name:     "RTRIM$",
+			funcName: "RTRIM$",
+			args:     []ast.Expression{&ast.StringLiteral{Value: "hi  "}},
+			want:     "rt.RTrim(",
+		},
+		{
+			name:     "SPACE$",
+			funcName: "SPACE$",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 5, NumType: ast.NumInt}},
+			want:     "rt.Space(",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts := []ast.Statement{
+				&ast.PrintStatement{
+					Expressions: []ast.Expression{
+						&ast.FunctionCall{
+							Name: tt.funcName,
+							Args: tt.args,
+						},
+					},
+					Separators: []string{""},
+				},
+			}
+			out := generate(t, stmts)
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("expected %q in output\nGot:\n%s", tt.want, out)
+			}
+			// Ensure it is NOT an array access (e.g. CHR_str[...]).
+			badPattern := strings.ToUpper(strings.TrimSuffix(tt.funcName, "$")) + "_str["
+			if strings.Contains(out, badPattern) {
+				t.Errorf("found array access pattern %q — builtin emitted as array access instead of function call\nGot:\n%s", badPattern, out)
+			}
+		})
+	}
+}
+
 func TestBinaryExprPower(t *testing.T) {
 	stmts := []ast.Statement{
 		&ast.PrintStatement{
@@ -625,5 +766,432 @@ func TestBeepStatement(t *testing.T) {
 	out := generate(t, stmts)
 	if !strings.Contains(out, `"\a"`) {
 		t.Errorf("expected bell character for BEEP, got:\n%s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// No-argument builtin identifiers (INKEY$, DATE$, TIME$, RND, TIMER, ERR, ERL, ERADR)
+// ---------------------------------------------------------------------------
+
+func TestBuiltinInkeyDollar(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{
+				&ast.Identifier{Name: "INKEY", TypeSuffix: "$"},
+			},
+			Separators: []string{""},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rt.Inkey()") {
+		t.Errorf("expected rt.Inkey(), got:\n%s", out)
+	}
+}
+
+func TestBuiltinDateDollar(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{
+				&ast.Identifier{Name: "DATE", TypeSuffix: "$"},
+			},
+			Separators: []string{""},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rt.DateStr()") {
+		t.Errorf("expected rt.DateStr(), got:\n%s", out)
+	}
+}
+
+func TestBuiltinTimeDollar(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{
+				&ast.Identifier{Name: "TIME", TypeSuffix: "$"},
+			},
+			Separators: []string{""},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rt.TimeStr()") {
+		t.Errorf("expected rt.TimeStr(), got:\n%s", out)
+	}
+}
+
+func TestBuiltinRndIdentifier(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "x"},
+			Value: &ast.Identifier{Name: "RND"},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rng.Rnd(1)") {
+		t.Errorf("expected rng.Rnd(1), got:\n%s", out)
+	}
+	if !strings.Contains(out, "rng := rt.NewRNG()") {
+		t.Errorf("expected rng preamble, got:\n%s", out)
+	}
+}
+
+func TestBuiltinTimerIdentifier(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "x"},
+			Value: &ast.Identifier{Name: "TIMER"},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rt.Timer()") {
+		t.Errorf("expected rt.Timer(), got:\n%s", out)
+	}
+}
+
+func TestBuiltinErrIdentifier(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{
+				&ast.Identifier{Name: "ERR"},
+			},
+			Separators: []string{""},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "float64(errState.Err())") {
+		t.Errorf("expected float64(errState.Err()), got:\n%s", out)
+	}
+	if !strings.Contains(out, "errState := rt.NewErrorState()") {
+		t.Errorf("expected errState preamble, got:\n%s", out)
+	}
+}
+
+func TestBuiltinErlIdentifier(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PrintStatement{
+			Expressions: []ast.Expression{
+				&ast.Identifier{Name: "ERL"},
+			},
+			Separators: []string{""},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "float64(errState.Erl())") {
+		t.Errorf("expected float64(errState.Erl()), got:\n%s", out)
+	}
+	if !strings.Contains(out, "errState := rt.NewErrorState()") {
+		t.Errorf("expected errState preamble, got:\n%s", out)
+	}
+}
+
+func TestBuiltinEradrIdentifier(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "x"},
+			Value: &ast.Identifier{Name: "ERADR"},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "float64(0)") {
+		t.Errorf("expected float64(0) for ERADR, got:\n%s", out)
+	}
+}
+
+// TestFrePeekEofEmission verifies that FRE, PEEK, and EOF are emitted as
+// runtime/fm calls rather than falling through to the user-function default.
+func TestFrePeekEofEmission(t *testing.T) {
+	tests := []struct {
+		name     string
+		funcName string
+		args     []ast.Expression
+		want     string
+	}{
+		{
+			name:     "FRE with arg",
+			funcName: "FRE",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 0}},
+			want:     "rt.Fre(",
+		},
+		{
+			name:     "FRE no args",
+			funcName: "FRE",
+			args:     nil,
+			want:     "rt.Fre(0)",
+		},
+		{
+			name:     "PEEK with arg",
+			funcName: "PEEK",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 1000}},
+			want:     "rt.Peek(",
+		},
+		{
+			name:     "PEEK no args",
+			funcName: "PEEK",
+			args:     nil,
+			want:     "rt.Peek(0)",
+		},
+		{
+			name:     "EOF with file number",
+			funcName: "EOF",
+			args:     []ast.Expression{&ast.NumberLiteral{Value: 1}},
+			want:     "fm.Eof(",
+		},
+		{
+			name:     "EOF no args",
+			funcName: "EOF",
+			args:     nil,
+			want:     "float64(0)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts := []ast.Statement{
+				&ast.PrintStatement{
+					Expressions: []ast.Expression{
+						&ast.FunctionCall{
+							Name: tc.funcName,
+							Args: tc.args,
+						},
+					},
+					Separators: []string{""},
+				},
+			}
+			out := generate(t, stmts)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("expected %q in output, got:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestSharedVarsPackageLevel verifies that SHARED variables inside SUBs
+// are emitted as package-level var declarations, not inside main() or
+// the SUB body.
+func TestSharedVarsPackageLevel(t *testing.T) {
+	stmts := []ast.Statement{
+		// DIM Name1$ in main
+		&ast.DimStatement{
+			Declarations: []ast.DimDecl{
+				{Name: "Name1", TypeSuffix: "$", ElementType: "STRING"},
+			},
+		},
+		// LET Name1$ = "Alice" in main
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "Name1", TypeSuffix: "$"},
+			Value: &ast.StringLiteral{Value: "Alice"},
+		},
+		// SUB ShowInfo with SHARED Name1$
+		&ast.SubDeclaration{
+			Name: "ShowInfo",
+			Body: []ast.Statement{
+				&ast.ScopeStatement{
+					Modifier:  "SHARED",
+					Variables: []string{"Name1$"},
+				},
+				&ast.PrintStatement{
+					Expressions: []ast.Expression{
+						&ast.Identifier{Name: "Name1", TypeSuffix: "$"},
+					},
+					Separators: []string{""},
+				},
+			},
+		},
+	}
+	out := generate(t, stmts)
+
+	// Name1_str should be declared at package level.
+	if !strings.Contains(out, "var Name1_str string") {
+		t.Errorf("expected package-level 'var Name1_str string', got:\n%s", out)
+	}
+
+	// The package-level declaration should appear BEFORE func main().
+	pkgIdx := strings.Index(out, "var Name1_str string")
+	mainIdx := strings.Index(out, "func main()")
+	if pkgIdx > mainIdx {
+		t.Errorf("package-level var should appear before func main(), pkgIdx=%d mainIdx=%d", pkgIdx, mainIdx)
+	}
+
+	// Name1_str should NOT be re-declared inside main() (assignment only).
+	mainBody := out[mainIdx:]
+	if strings.Contains(mainBody, "var Name1_str string") {
+		t.Errorf("Name1_str should not be re-declared inside main(), got:\n%s", mainBody)
+	}
+
+	// The SUB body should use Name1_str without declaring it.
+	subIdx := strings.Index(out, "func ShowInfo()")
+	if subIdx < 0 {
+		t.Fatalf("expected func ShowInfo() in output, got:\n%s", out)
+	}
+	subBody := out[subIdx:]
+	if strings.Contains(subBody, "var Name1_str") {
+		t.Errorf("Name1_str should not be declared inside SUB, got:\n%s", subBody)
+	}
+}
+
+// TestSubDeclSeparateScope verifies that variables declared inside a SUB
+// do not leak into main's declared set.
+func TestSubDeclSeparateScope(t *testing.T) {
+	stmts := []ast.Statement{
+		// SUB with a local variable
+		&ast.SubDeclaration{
+			Name: "MySub",
+			Body: []ast.Statement{
+				&ast.LetStatement{
+					Name:  &ast.Identifier{Name: "LocalVar", TypeSuffix: "$"},
+					Value: &ast.StringLiteral{Value: "hello"},
+				},
+			},
+		},
+		// Same variable name in main should get its own declaration
+		&ast.LetStatement{
+			Name:  &ast.Identifier{Name: "LocalVar", TypeSuffix: "$"},
+			Value: &ast.StringLiteral{Value: "world"},
+		},
+	}
+	out := generate(t, stmts)
+
+	// LocalVar_str should be declared in both main and the SUB.
+	mainIdx := strings.Index(out, "func main()")
+	subIdx := strings.Index(out, "func MySub()")
+	if mainIdx < 0 || subIdx < 0 {
+		t.Fatalf("expected func main() and func MySub() in output, got:\n%s", out)
+	}
+
+	mainBody := out[mainIdx:subIdx]
+	subBody := out[subIdx:]
+
+	if !strings.Contains(mainBody, "var LocalVar_str string") {
+		t.Errorf("expected LocalVar_str declaration in main, got:\n%s", mainBody)
+	}
+	if !strings.Contains(subBody, "var LocalVar_str string") {
+		t.Errorf("expected LocalVar_str declaration in SUB, got:\n%s", subBody)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// File I/O statement emission tests
+// ---------------------------------------------------------------------------
+
+func TestFilePrintStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.FilePrintStatement{
+			FileNum:     &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			Expressions: []ast.Expression{&ast.StringLiteral{Value: "hello"}},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.FilePrint(") {
+		t.Errorf("expected fm.FilePrint call, got:\n%s", out)
+	}
+	if !strings.Contains(out, "fm := rt.NewFileManager()") {
+		t.Errorf("expected FileManager declaration, got:\n%s", out)
+	}
+}
+
+func TestFileInputStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.FileInputStatement{
+			FileNum:   &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			Variables: []ast.Expression{&ast.Identifier{Name: "a", TypeSuffix: "$"}},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.FileInput(") {
+		t.Errorf("expected fm.FileInput call, got:\n%s", out)
+	}
+}
+
+func TestFileWriteStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.FileWriteStatement{
+			FileNum:     &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			Expressions: []ast.Expression{&ast.StringLiteral{Value: "test"}, &ast.NumberLiteral{Value: 100, NumType: ast.NumInt}},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.FileWrite(") {
+		t.Errorf("expected fm.FileWrite call, got:\n%s", out)
+	}
+}
+
+func TestFieldStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.FieldStatement{
+			FileNum: &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			Fields: []ast.FieldDef{
+				{Length: &ast.NumberLiteral{Value: 20, NumType: ast.NumInt}, VarName: "A$"},
+				{Length: &ast.NumberLiteral{Value: 10, NumType: ast.NumInt}, VarName: "B$"},
+			},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.Field(") {
+		t.Errorf("expected fm.Field call, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rt.FieldDef") {
+		t.Errorf("expected rt.FieldDef in output, got:\n%s", out)
+	}
+}
+
+func TestLsetStatementEmission(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.LsetStatement{
+			Variable: "A$",
+			Value:    &ast.StringLiteral{Value: "hello"},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.Lset(") {
+		t.Errorf("expected fm.Lset call, got:\n%s", out)
+	}
+}
+
+func TestPutStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.PutStatement{
+			FileNum:     &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			RecordOrPos: &ast.NumberLiteral{Value: 5, NumType: ast.NumInt},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.RandomPut(") {
+		t.Errorf("expected fm.RandomPut call, got:\n%s", out)
+	}
+}
+
+func TestGetStatementEmission(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.GetStatement{
+			FileNum:     &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			RecordOrPos: &ast.NumberLiteral{Value: 3, NumType: ast.NumInt},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.RandomGet(") {
+		t.Errorf("expected fm.RandomGet call, got:\n%s", out)
+	}
+}
+
+func TestSeekStatementEmission(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.SeekStatement{
+			FileNum:  &ast.NumberLiteral{Value: 1, NumType: ast.NumInt},
+			Position: &ast.NumberLiteral{Value: 10, NumType: ast.NumInt},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "fm.FileSeek(") {
+		t.Errorf("expected fm.FileSeek call, got:\n%s", out)
+	}
+}
+
+func TestScreenStatement(t *testing.T) {
+	stmts := []ast.Statement{
+		&ast.ScreenStatement{
+			Mode: &ast.NumberLiteral{Value: 13, NumType: ast.NumInt},
+		},
+	}
+	out := generate(t, stmts)
+	if !strings.Contains(out, "rt.ScreenMode(int(13))") {
+		t.Errorf("expected rt.ScreenMode(int(13)), got:\n%s", out)
 	}
 }

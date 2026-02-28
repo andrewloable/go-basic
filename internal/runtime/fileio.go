@@ -396,7 +396,20 @@ func (fm *FileManager) GetFieldValue(num int, fieldName string) (string, error) 
 }
 
 // Lset left-justifies a string into a field variable, padding with spaces.
+// If num is 0, searches all open files for the named field.
 func (fm *FileManager) Lset(num int, fieldName string, value string) error {
+	if num == 0 {
+		for n := range fm.files {
+			if err := fm.lsetFile(n, fieldName, value); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("field %q not defined in any open file", fieldName)
+	}
+	return fm.lsetFile(num, fieldName, value)
+}
+
+func (fm *FileManager) lsetFile(num int, fieldName string, value string) error {
 	bf, err := fm.getFile(num)
 	if err != nil {
 		return err
@@ -421,7 +434,20 @@ func (fm *FileManager) Lset(num int, fieldName string, value string) error {
 }
 
 // Rset right-justifies a string into a field variable, padding with spaces.
+// If num is 0, searches all open files for the named field.
 func (fm *FileManager) Rset(num int, fieldName string, value string) error {
+	if num == 0 {
+		for n := range fm.files {
+			if err := fm.rsetFile(n, fieldName, value); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("field %q not defined in any open file", fieldName)
+	}
+	return fm.rsetFile(num, fieldName, value)
+}
+
+func (fm *FileManager) rsetFile(num int, fieldName string, value string) error {
 	bf, err := fm.getFile(num)
 	if err != nil {
 		return err

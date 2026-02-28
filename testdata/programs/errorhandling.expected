@@ -13,15 +13,17 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	errState := rt.NewErrorState()
+	_ = errState
 	// Test error handling
-	// TODO: ON ERROR GOTO handler
+	errState.SetHandler("label_handler") // ON ERROR GOTO handler
 	fmt.Println("Before error")
-	// TODO: ERROR float64(5)
+	// TODO: ERROR 5
 	//  Illegal function call
 	fmt.Println("This should not print")
 	os.Exit(0)
 label_handler:
 	fmt.Println("Error caught!")
-	fmt.Println("Error code:", ERR)
-	// TODO: RESUME NEXT
+	fmt.Println("Error code:", float64(errState.Err()))
+	errState.ClearError() // RESUME NEXT — clear error and continue
 }

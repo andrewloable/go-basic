@@ -2092,10 +2092,9 @@ func (p *Parser) parseRandomizeStatement() ast.Statement {
 	if !p.curTokenIs(lexer.TOKEN_EOL) && !p.curTokenIs(lexer.TOKEN_EOF) && !p.curTokenIs(lexer.TOKEN_COLON) {
 		seed = p.parseExpression(PREC_LOWEST)
 	}
-	return &ast.LetStatement{
+	return &ast.RandomizeStatement{
 		BasePos: pos,
-		Name:    &ast.Identifier{BasePos: pos, Name: "RANDOMIZE"},
-		Value:   seed,
+		Seed:    seed,
 	}
 }
 

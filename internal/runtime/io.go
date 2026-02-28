@@ -748,6 +748,26 @@ func InputPrompt(prompt string) string {
 	}
 }
 
+// NewScanner creates a new bufio.Scanner that reads from os.Stdin.
+// This is used by the generated code for INPUT and LINE INPUT statements.
+func NewScanner() *bufio.Scanner {
+	return bufio.NewScanner(os.Stdin)
+}
+
+// InputSplitLine reads one line from stdin and splits it by commas, returning
+// the trimmed parts. This implements BASIC's multi-variable INPUT semantics:
+// the user types all values on one line separated by commas.
+func InputSplitLine() []string {
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	line := scanner.Text()
+	parts := strings.Split(line, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
 // AnsiLocate returns ANSI escape sequence to move cursor to row, col (1-based).
 func AnsiLocate(row, col int) string {
 	return fmt.Sprintf("\033[%d;%dH", row, col)
