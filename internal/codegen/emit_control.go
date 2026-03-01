@@ -206,6 +206,7 @@ func (g *CodeGenerator) emitFor(s *ast.ForStatement) {
 func (g *CodeGenerator) emitWhile(s *ast.WhileStatement) {
 	g.writeLinef("for %s {", g.toBoolExprFromNode(s.Condition))
 	g.indent++
+	g.writeLine("rt.LoopYield()")
 	for _, stmt := range s.Body {
 		g.emitStatement(stmt)
 	}
@@ -222,6 +223,7 @@ func (g *CodeGenerator) emitDoLoop(s *ast.DoLoopStatement) {
 		// Infinite loop: DO ... LOOP
 		g.writeLine("for {")
 		g.indent++
+		g.writeLine("rt.LoopYield()")
 		for _, stmt := range s.Body {
 			g.emitStatement(stmt)
 		}
@@ -239,6 +241,7 @@ func (g *CodeGenerator) emitDoLoop(s *ast.DoLoopStatement) {
 			g.writeLinef("for %s {", boolCond)
 		}
 		g.indent++
+		g.writeLine("rt.LoopYield()")
 		for _, stmt := range s.Body {
 			g.emitStatement(stmt)
 		}
@@ -248,6 +251,7 @@ func (g *CodeGenerator) emitDoLoop(s *ast.DoLoopStatement) {
 		// Test at bottom.
 		g.writeLine("for {")
 		g.indent++
+		g.writeLine("rt.LoopYield()")
 		for _, stmt := range s.Body {
 			g.emitStatement(stmt)
 		}
@@ -375,13 +379,29 @@ func (g *CodeGenerator) emitGoto(s *ast.GotoStatement) {
 }
 
 func (g *CodeGenerator) emitGosub(s *ast.GosubStatement) {
-	// In Go we cannot do a true GOSUB/RETURN. Emit as a goto with a comment.
+	// Emit GOSUB as: set return address, jump to target, emit return label.
+	// RETURN uses a switch on gosubReturnAddr to jump back here.
+	g.gosubCallID++
+	id := g.gosubCallID
 	label := g.labelName(s.Target)
+	g.writeLinef("gosubReturnAddr = %d", id)
 	g.writeLinef("goto %s // GOSUB", label)
+	g.writeLinef("label_gosubReturn_%d:", id)
 }
 
 func (g *CodeGenerator) emitReturn(_ *ast.ReturnStatement) {
-	g.writeLine("return // RETURN")
+	if !g.hasGosub {
+		g.writeLine("return // RETURN")
+		return
+	}
+	// Emit a switch on the GOSUB return address to jump back to the correct call site.
+	// gosubTotalCallSites is computed in the pre-pass so all return labels are covered
+	// even if this RETURN is emitted before some GOSUB call sites.
+	g.writeLine("switch gosubReturnAddr { // RETURN")
+	for i := 1; i <= g.gosubTotalCallSites; i++ {
+		g.writeLinef("case %d: goto label_gosubReturn_%d", i, i)
+	}
+	g.writeLine("}")
 }
 
 // ---------------------------------------------------------------------------

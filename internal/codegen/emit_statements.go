@@ -148,12 +148,33 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		g.emitGet(s)
 	case *ast.SeekStatement:
 		g.emitSeek(s)
+	case *ast.KillStatement:
+		g.imports["os"] = true
+		g.writeLinef("os.Remove(%s) // KILL", g.emitExpr(s.Filename))
+	case *ast.NameStatement:
+		g.imports["os"] = true
+		g.writeLinef("os.Rename(%s, %s) // NAME ... AS ...", g.emitExpr(s.OldName), g.emitExpr(s.NewName))
+	case *ast.ChdirStatement:
+		g.imports["os"] = true
+		g.writeLinef("os.Chdir(%s) // CHDIR", g.emitExpr(s.Path))
+	case *ast.MkdirStatement:
+		g.imports["os"] = true
+		g.writeLinef("os.Mkdir(%s, 0755) // MKDIR", g.emitExpr(s.Path))
+	case *ast.RmdirStatement:
+		g.imports["os"] = true
+		g.writeLinef("os.Remove(%s) // RMDIR", g.emitExpr(s.Path))
 	case *ast.LocateStatement:
 		g.emitLocate(s)
 	case *ast.ClsStatement:
-		g.writeLine("fmt.Print(rt.AnsiCls()) // CLS")
+		if s.Mode != nil {
+			g.writeLinef("rt.Cls(int(%s))", g.emitExpr(s.Mode))
+		} else {
+			g.writeLine("rt.Cls(0)")
+		}
 	case *ast.ScreenStatement:
 		g.writeLinef("rt.ScreenMode(int(%s))", g.emitExpr(s.Mode))
+	case *ast.PaletteStatement:
+		g.writeLinef("rt.PaletteRemap(int(%s), int(%s))", g.emitExpr(s.Index), g.emitExpr(s.Color))
 	case *ast.ColorStatement:
 		g.emitColor(s)
 	case *ast.CircleStmt:
@@ -166,6 +187,10 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		g.emitPaint(s)
 	case *ast.DrawStmt:
 		g.writeLinef("rt.Draw(%s)", g.emitExpr(s.CommandString))
+	case *ast.GraphicsGetStatement:
+		g.emitGraphicsGet(s)
+	case *ast.GraphicsPutStatement:
+		g.emitGraphicsPut(s)
 	case *ast.ViewStatement:
 		g.emitView(s)
 	case *ast.OnErrorGotoStatement:
@@ -276,6 +301,9 @@ func (g *CodeGenerator) emitStatement(stmt ast.Statement) {
 		} else {
 			g.writeLinef("errState.TriggerError(int(%s), 0)", g.emitExpr(s.Code))
 		}
+
+	case *ast.OnEventGosubStatement:
+		g.writeLinef("// ON %s GOSUB %s (event-driven callbacks not yet supported)", s.EventType, s.Target)
 
 	// Sub/Function/DefFn declarations are handled separately via emitTopLevelDecl.
 	case *ast.SubDeclaration:
@@ -608,8 +636,16 @@ func (g *CodeGenerator) emitRem(s *ast.RemStatement) {
 	g.writeLinef("// %s", s.Text)
 }
 
-// emitRestore emits the RESTORE statement (reset dataIdx to start of pool).
-func (g *CodeGenerator) emitRestore(_ *ast.RestoreStatement) {
+// emitRestore emits the RESTORE statement (reset dataIdx).
+// If a label is specified, sets dataIdx to the position of that label's DATA.
+func (g *CodeGenerator) emitRestore(s *ast.RestoreStatement) {
+	if s.Target != "" {
+		key := strings.ToUpper(s.Target)
+		if idx, ok := g.dataLabelMap[key]; ok {
+			g.writeLinef("dataIdx = %d // RESTORE %s", idx, s.Target)
+			return
+		}
+	}
 	g.writeLine("dataIdx = 0 // RESTORE")
 }
 
@@ -641,17 +677,21 @@ func (g *CodeGenerator) emitOnComputedGoto(s *ast.OnComputedGotoStatement) {
 	g.writeLine("}")
 }
 
-// emitOnComputedGosub emits ON expr GOSUB t1, t2, ... as a series of if/goto.
-// True GOSUB (save return address, jump, return) can't be emulated with goto,
-// so we use goto for now — the RETURN at the subroutine end exits the function.
+// emitOnComputedGosub emits ON expr GOSUB t1, t2, ... with proper return support.
+// Each target gets a unique return address so RETURN can jump back to the correct call site.
 func (g *CodeGenerator) emitOnComputedGosub(s *ast.OnComputedGosubStatement) {
+	g.gosubCallID++
+	id := g.gosubCallID
+
 	expr := g.emitExpr(s.Expr)
 	g.writeLine("{")
 	g.indent++
 	g.writeLinef("_on_idx := int(%s)", expr)
+	g.writeLinef("gosubReturnAddr = %d", id)
 	for i, t := range s.Targets {
 		g.writeLinef("if _on_idx == %d { goto %s }", i+1, g.labelName(t))
 	}
 	g.indent--
 	g.writeLine("}")
+	g.writeLinef("label_gosubReturn_%d:", id)
 }

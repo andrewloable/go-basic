@@ -719,9 +719,9 @@ func TestParseWindowStatementNoArgs(t *testing.T) {
 func TestParsePaletteStatement(t *testing.T) {
 	prog, errs := parse("PALETTE 1, 4")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PALETTE" {
-		t.Errorf("expected Text='PALETTE', got %q", s.Text)
+	s := getStmt[*ast.PaletteStatement](t, prog, 0)
+	if s.Index == nil || s.Color == nil {
+		t.Error("expected Index and Color to be set")
 	}
 }
 
@@ -729,8 +729,8 @@ func TestParsePaletteStatementNoArgs(t *testing.T) {
 	prog, errs := parse("PALETTE")
 	expectNoErrors(t, errs)
 	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PALETTE" {
-		t.Errorf("expected Text='PALETTE', got %q", s.Text)
+	if s.Text != "PALETTE (reset)" {
+		t.Errorf("expected Text='PALETTE (reset)', got %q", s.Text)
 	}
 }
 

@@ -13,6 +13,10 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	rt.RunMain(basicMain)
+}
+
+func basicMain() {
 	// Hoisted variable declarations (avoids goto-over-declaration errors).
 	var i float32
 	var x float32
@@ -40,6 +44,7 @@ func main() {
 	fmt.Println("WHILE loop:")
 	x = float32(1)
 	for (x <= 5) {
+		rt.LoopYield()
 		fmt.Print(x)
 		x = float32((x + 1))
 	}
@@ -48,6 +53,7 @@ func main() {
 	fmt.Println("DO WHILE loop:")
 	x = float32(1)
 	for (x <= 5) {
+		rt.LoopYield()
 		fmt.Print(x)
 		x = float32((x + 1))
 	}
@@ -56,6 +62,7 @@ func main() {
 	fmt.Println("DO UNTIL loop:")
 	x = float32(1)
 	for {
+		rt.LoopYield()
 		fmt.Print(x)
 		x = float32((x + 1))
 		if (x > 5) { break }

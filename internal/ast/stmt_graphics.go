@@ -314,3 +314,43 @@ type RandomizeStatement struct {
 func (s *RandomizeStatement) statementNode()      {}
 func (s *RandomizeStatement) TokenLiteral() string { return "RANDOMIZE" }
 func (s *RandomizeStatement) Pos() Position        { return s.BasePos }
+
+// GraphicsGetStatement represents GET (x1,y1)-(x2,y2), arrayVar.
+// Captures a rectangular region of the framebuffer into an integer array.
+type GraphicsGetStatement struct {
+	BasePos  Position
+	X1       Expression
+	Y1       Expression
+	X2       Expression
+	Y2       Expression
+	ArrayVar Expression // identifier for the target array
+}
+
+func (n *GraphicsGetStatement) statementNode()      {}
+func (n *GraphicsGetStatement) TokenLiteral() string { return "GET" }
+func (n *GraphicsGetStatement) Pos() Position        { return n.BasePos }
+
+// GraphicsPutStatement represents PUT (x,y), arrayVar [, actionVerb].
+// Draws a sprite from an integer array onto the framebuffer.
+type GraphicsPutStatement struct {
+	BasePos  Position
+	X        Expression
+	Y        Expression
+	ArrayVar Expression // identifier for the source array
+	Action   string     // "PSET", "PRESET", "AND", "OR", "XOR" (default "XOR")
+}
+
+func (n *GraphicsPutStatement) statementNode()      {}
+func (n *GraphicsPutStatement) TokenLiteral() string { return "PUT" }
+func (n *GraphicsPutStatement) Pos() Position        { return n.BasePos }
+
+// PaletteStatement represents PALETTE index, color.
+type PaletteStatement struct {
+	BasePos Position
+	Index   Expression
+	Color   Expression
+}
+
+func (n *PaletteStatement) statementNode()      {}
+func (n *PaletteStatement) TokenLiteral() string { return "PALETTE" }
+func (n *PaletteStatement) Pos() Position        { return n.BasePos }

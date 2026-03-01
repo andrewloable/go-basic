@@ -15,6 +15,10 @@ var _ = rt.Abs
 var errState = rt.NewErrorState()
 
 func main() {
+	rt.RunMain(basicMain)
+}
+
+func basicMain() {
 	// Test error handling
 	errState.SetHandler("label_handler") // ON ERROR GOTO handler
 	if false { goto label_handler } // ON ERROR GOTO reachability guard

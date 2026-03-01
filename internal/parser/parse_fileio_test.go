@@ -115,9 +115,12 @@ func TestParseGetGraphics(t *testing.T) {
 	// GET (x1,y1)-(x2,y2), array — graphics GET
 	prog, errs := parse("GET (0,0)-(100,100), img()")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "GET (graphics)" {
-		t.Errorf("expected 'GET (graphics)', got %q", s.Text)
+	s := getStmt[*ast.GraphicsGetStatement](t, prog, 0)
+	if s.X1 == nil || s.Y1 == nil || s.X2 == nil || s.Y2 == nil {
+		t.Error("expected all coordinates to be set")
+	}
+	if s.ArrayVar == nil {
+		t.Error("expected ArrayVar to be set")
 	}
 }
 
@@ -173,12 +176,18 @@ func TestParsePutFileSkipRecord(t *testing.T) {
 }
 
 func TestParsePutGraphics(t *testing.T) {
-	// PUT (x,y), array — graphics PUT
+	// PUT (x,y), array — graphics PUT (default XOR)
 	prog, errs := parse("PUT (50, 50), sprite()")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PUT (graphics)" {
-		t.Errorf("expected 'PUT (graphics)', got %q", s.Text)
+	s := getStmt[*ast.GraphicsPutStatement](t, prog, 0)
+	if s.X == nil || s.Y == nil {
+		t.Error("expected coordinates to be set")
+	}
+	if s.ArrayVar == nil {
+		t.Error("expected ArrayVar to be set")
+	}
+	if s.Action != "XOR" {
+		t.Errorf("expected default action 'XOR', got %q", s.Action)
 	}
 }
 
@@ -186,27 +195,27 @@ func TestParsePutGraphicsWithMode(t *testing.T) {
 	// PUT (x,y), array, XOR — graphics PUT with mode keyword
 	prog, errs := parse("PUT (50, 50), sprite(), XOR")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PUT (graphics)" {
-		t.Errorf("expected 'PUT (graphics)', got %q", s.Text)
+	s := getStmt[*ast.GraphicsPutStatement](t, prog, 0)
+	if s.Action != "XOR" {
+		t.Errorf("expected action 'XOR', got %q", s.Action)
 	}
 }
 
 func TestParsePutGraphicsWithPsetMode(t *testing.T) {
 	prog, errs := parse("PUT (50, 50), sprite(), PSET")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PUT (graphics)" {
-		t.Errorf("expected 'PUT (graphics)', got %q", s.Text)
+	s := getStmt[*ast.GraphicsPutStatement](t, prog, 0)
+	if s.Action != "PSET" {
+		t.Errorf("expected action 'PSET', got %q", s.Action)
 	}
 }
 
 func TestParsePutGraphicsWithOrMode(t *testing.T) {
 	prog, errs := parse("PUT (50, 50), sprite(), OR")
 	expectNoErrors(t, errs)
-	s := getStmt[*ast.RemStatement](t, prog, 0)
-	if s.Text != "PUT (graphics)" {
-		t.Errorf("expected 'PUT (graphics)', got %q", s.Text)
+	s := getStmt[*ast.GraphicsPutStatement](t, prog, 0)
+	if s.Action != "OR" {
+		t.Errorf("expected action 'OR', got %q", s.Action)
 	}
 }
 

@@ -13,6 +13,10 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	rt.RunMain(basicMain)
+}
+
+func basicMain() {
 	fmt.Println("Hello, World!")
 	os.Exit(0)
 }

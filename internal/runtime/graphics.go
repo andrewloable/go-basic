@@ -190,12 +190,46 @@ func ScreenMode(mode int) {
 	if mode != 0 {
 		s.Framebuffer = allocFramebuffer(spec.w, spec.h)
 	}
+
+	if mode == 0 && gfxWindowCreated {
+		// Switching to text mode while the Ebitengine window is open:
+		// render text in the window instead of closing it.
+		CurrentScreen = s
+		gfxTextMode = true
+		gfxActive = true
+		// Resize the window to 640x400 (80 cols × 8px, 25 rows × 16px).
+		gfxNewWidth = 640
+		gfxNewHeight = 400
+		gfxNewMode = 0
+		gfxResizeReq = true
+		// Reset the text buffer for the fresh SCREEN 0.
+		if TextBuf != nil {
+			TextBuf.Clear()
+		}
+		// Ensure the text writer is installed (intercepts stdout).
+		InstallTextWriter()
+		return
+	}
+
+	if mode != 0 && gfxTextMode {
+		// Switching from text mode to a graphics mode.
+		gfxTextMode = false
+	}
+
 	// Close any existing graphics window before switching modes.
 	CloseGraphicsWindow()
 	CurrentScreen = s
 	// Open a graphics window for non-text modes.
 	if mode != 0 {
 		OpenGraphicsWindow()
+		// Install text writer so PRINT/INPUT text renders into the framebuffer
+		// via the Ebitengine window instead of going to the terminal.
+		textCols := spec.w / 8
+		textRows := 25
+		if spec.h < 25*8 {
+			textRows = spec.h / 8
+		}
+		InstallTextWriterWithSize(textCols, textRows)
 	}
 }
 
@@ -316,6 +350,11 @@ func SetGraphicsColor(fg, bg int) {
 // the default drawing color when PSET/LINE/CIRCLE omit the color argument).
 func GetForegroundColor() float64 {
 	return float64(CurrentScreen.FgColor)
+}
+
+// GetBackgroundColor returns the current background color index (used by PRESET).
+func GetBackgroundColor() float64 {
+	return float64(CurrentScreen.BgColor)
 }
 
 // DrawLine draws a line or box. boxMode is "", "B", or "BF".
@@ -762,4 +801,228 @@ func ViewPort(x1, y1, x2, y2, fillColor, borderColor float64) {
 func ViewPrint(top, bottom float64) {
 	CurrentScreen.TextTop = int(top)
 	CurrentScreen.TextBottom = int(bottom)
+}
+
+// screenPlaneInfo returns the bits-per-pixel-per-plane and number of planes
+// for the current screen mode, matching QBasic's GET/PUT array format.
+//
+// QBasic stores sprite data in a planar format for EGA/VGA modes:
+//   SCREEN 1  (CGA):   2 bits/pixel/plane, 1 plane
+//   SCREEN 2  (CGA):   1 bit/pixel/plane,  1 plane
+//   SCREEN 7  (EGA):   1 bit/pixel/plane,  4 planes
+//   SCREEN 8,9,12 (EGA/VGA16): 1 bit/pixel/plane, 4 planes
+//   SCREEN 13 (VGA256): 8 bits/pixel/plane, 1 plane
+func screenPlaneInfo() (bppPerPlane int, planes int) {
+	switch CurrentScreen.Mode {
+	case 1:
+		return 2, 1
+	case 2, 11:
+		return 1, 1
+	case 7, 8, 9, 12:
+		return 1, 4
+	case 10:
+		return 1, 2
+	case 13:
+		return 8, 1
+	default:
+		return 1, 4 // default to EGA-like
+	}
+}
+
+// GraphicsGet captures a rectangular region of the framebuffer into an integer
+// array using QBasic's planar GET/PUT format.
+//
+// QBasic format (int32 array):
+//
+//	arr[0]: low 16 bits = width * bitsPerPixelPerPlane, high 16 bits = height
+//	arr[1..]: pixel data stored with planes interleaved per row:
+//	          for each row: plane0 bytes, plane1 bytes, ..., planeN bytes
+//	          each plane's row data is padded to byte boundary
+//
+// The slice is automatically grown if needed.
+func GraphicsGet(x1, y1, x2, y2 int, arr *[]int32) {
+	s := CurrentScreen
+	fb := s.Framebuffer
+	if fb == nil || arr == nil {
+		return
+	}
+	if x1 > x2 {
+		x1, x2 = x2, x1
+	}
+	if y1 > y2 {
+		y1, y2 = y2, y1
+	}
+	w := x2 - x1 + 1
+	h := y2 - y1 + 1
+	bppPerPlane, planes := screenPlaneInfo()
+
+	// Calculate how many bytes per row per plane.
+	bitsPerRow := w * bppPerPlane
+	bytesPerRow := (bitsPerRow + 7) / 8
+	// Total data bytes: bytesPerRow * planes * height
+	totalDataBytes := bytesPerRow * planes * h
+	dataInt32s := (totalDataBytes + 3) / 4
+	needed := 1 + dataInt32s // 1 header + data
+
+	if len(*arr) < needed {
+		*arr = make([]int32, needed)
+	}
+	// Clear the array (important for bit packing).
+	for i := range *arr {
+		(*arr)[i] = 0
+	}
+
+	// Header: low 16 bits = width * bppPerPlane, high 16 bits = height
+	(*arr)[0] = int32(uint16(w*bppPerPlane)) | (int32(uint16(h)) << 16)
+
+	gfxMu.Lock()
+	// Data is interleaved per row: for each row, store all planes' bytes.
+	byteOffset := 0 // byte offset within data portion (after header's 4 bytes)
+	for row := y1; row <= y2; row++ {
+		for plane := 0; plane < planes; plane++ {
+			bitInByte := 0
+			var curByte byte
+			for col := x1; col <= x2; col++ {
+				var pixel byte
+				if row >= 0 && row < len(fb) && col >= 0 && col < len(fb[row]) {
+					pixel = fb[row][col]
+				}
+				// Extract the bits for this plane from the pixel value.
+				var bits byte
+				if planes > 1 {
+					bits = (pixel >> uint(plane)) & 1
+				} else {
+					bits = pixel
+				}
+				// Pack bppPerPlane bits, MSB first.
+				for b := bppPerPlane - 1; b >= 0; b-- {
+					curByte = (curByte << 1) | ((bits >> uint(b)) & 1)
+					bitInByte++
+					if bitInByte == 8 {
+						int32Idx := 1 + byteOffset/4
+						byteInInt32 := byteOffset % 4
+						(*arr)[int32Idx] |= int32(curByte) << uint(byteInInt32*8)
+						byteOffset++
+						bitInByte = 0
+						curByte = 0
+					}
+				}
+			}
+			// Pad remaining bits in the last byte of this row-plane to a full byte.
+			if bitInByte > 0 {
+				curByte <<= uint(8 - bitInByte)
+				int32Idx := 1 + byteOffset/4
+				byteInInt32 := byteOffset % 4
+				(*arr)[int32Idx] |= int32(curByte) << uint(byteInInt32*8)
+				byteOffset++
+			}
+		}
+	}
+	gfxMu.Unlock()
+}
+
+// GraphicsPut draws sprite data from an integer array onto the framebuffer.
+// Uses QBasic's planar GET/PUT format with planes interleaved per row.
+//
+// QBasic format: arr[0] header = (width*bppPerPlane) | (height<<16),
+// arr[1..] pixel data with planes interleaved per row:
+// for each row: plane0 bytes, plane1 bytes, ..., planeN bytes.
+//
+// action: "PSET", "PRESET", "AND", "OR", "XOR" (default "XOR").
+func GraphicsPut(x, y int, arr []int32, action string) {
+	s := CurrentScreen
+	fb := s.Framebuffer
+	if fb == nil || len(arr) < 1 {
+		return
+	}
+
+	// Decode QBasic header.
+	header := arr[0]
+	widthBits := int(uint16(header & 0xFFFF))
+	h := int(uint16((header >> 16) & 0xFFFF))
+	bppPerPlane, planes := screenPlaneInfo()
+
+	if bppPerPlane == 0 || widthBits == 0 || h == 0 {
+		return
+	}
+	w := widthBits / bppPerPlane
+	if w <= 0 || h <= 0 {
+		return
+	}
+
+	// First pass: decode all pixel values from the interleaved planar data.
+	pixels := make([][]byte, h)
+	for r := range pixels {
+		pixels[r] = make([]byte, w)
+	}
+
+	byteOffset := 0 // byte offset within data portion
+	for row := 0; row < h; row++ {
+		for plane := 0; plane < planes; plane++ {
+			bitInByte := 8 // force read first byte
+			var curByte byte
+			for col := 0; col < w; col++ {
+				var val byte
+				for b := bppPerPlane - 1; b >= 0; b-- {
+					if bitInByte >= 8 {
+						// Read next byte from the int32 array.
+						int32Idx := 1 + byteOffset/4
+						byteInInt32 := byteOffset % 4
+						if int32Idx < len(arr) {
+							curByte = byte((arr[int32Idx] >> uint(byteInInt32*8)) & 0xFF)
+						} else {
+							curByte = 0
+						}
+						byteOffset++
+						bitInByte = 0
+					}
+					// Extract MSB first.
+					bit := (curByte >> 7) & 1
+					curByte <<= 1
+					bitInByte++
+					val = (val << 1) | bit
+				}
+				// Combine into pixel: for planar modes, each plane contributes
+				// one bit at position `plane` in the pixel value.
+				if planes > 1 {
+					pixels[row][col] |= val << uint(plane)
+				} else {
+					pixels[row][col] = val
+				}
+			}
+			// Row-plane padding: discard remaining bits in the current byte.
+			// The byte was already read (byteOffset incremented), so just
+			// reset bitInByte to force a fresh byte read for the next plane/row.
+			bitInByte = 8
+		}
+	}
+
+	// Second pass: apply pixels to framebuffer.
+	gfxMu.Lock()
+	for row := 0; row < h; row++ {
+		dy := y + row
+		if dy < 0 || dy >= len(fb) {
+			continue
+		}
+		for col := 0; col < w; col++ {
+			dx := x + col
+			if dx < 0 || dx >= len(fb[dy]) {
+				continue
+			}
+			pixel := pixels[row][col]
+			switch action {
+			case "PSET":
+				fb[dy][dx] = pixel
+			case "PRESET":
+				fb[dy][dx] = ^pixel
+			case "AND":
+				fb[dy][dx] &= pixel
+			case "OR":
+				fb[dy][dx] |= pixel
+			default: // "XOR"
+				fb[dy][dx] ^= pixel
+			}
+		}
+	}
+	gfxMu.Unlock()
 }

@@ -463,8 +463,8 @@ func TestEmitStatementBeep(t *testing.T) {
 func TestEmitStatementCls(t *testing.T) {
 	stmts := []ast.Statement{&ast.ClsStatement{}}
 	out := generate(t, stmts)
-	if !strings.Contains(out, "AnsiCls") {
-		t.Errorf("CLS: expected AnsiCls in output, got:\n%s", out)
+	if !strings.Contains(out, "rt.Cls(0)") {
+		t.Errorf("CLS: expected rt.Cls(0) in output, got:\n%s", out)
 	}
 }
 

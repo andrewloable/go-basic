@@ -154,6 +154,7 @@ type CodeGenerator struct {
 	gosubFuncs       map[string]bool  // GOSUB targets turned into functions
 	dataPool         []ast.Expression // DATA values
 	dataIdx          int              // current READ position
+	dataLabelMap     map[string]int   // label name → index into dataPool
 
 	// funcBuf collects SUB/FUNCTION declarations to emit outside main().
 	funcBuf bytes.Buffer
@@ -231,6 +232,15 @@ type CodeGenerator struct {
 	// should be passed by reference (pointer) because it is assigned to
 	// inside the SUB/FUNCTION body and not marked BYVAL.
 	paramsByRef map[string]bool
+
+	// gosubCallID is a counter for generating unique GOSUB return labels.
+	gosubCallID int
+	// gosubTotalCallSites is the total number of GOSUB call sites found during
+	// the pre-pass. Used by emitReturn to emit a complete switch covering all
+	// possible return addresses, even if some GOSUBs haven't been emitted yet.
+	gosubTotalCallSites int
+	// hasGosub tracks whether the program contains any GOSUB statements.
+	hasGosub bool
 }
 
 // hoistedVar represents a variable declaration to be hoisted to the top of main().
@@ -253,6 +263,7 @@ func New() *CodeGenerator {
 		declared:         make(map[string]bool),
 		labelMap:         make(map[string]bool),
 		referencedLabels: make(map[string]bool),
+		dataLabelMap:     make(map[string]int),
 		gosubFuncs:       make(map[string]bool),
 		hoistedSet:       make(map[string]bool),
 		hoistedTypes:     make(map[string]string),
@@ -350,6 +361,7 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 
 	// Check if the program uses any GOTO/GOSUB statements.
 	g.hasGoto = len(g.referencedLabels) > 0
+	// hasGosub is set during collectLabelsAndData when any GosubStatement is found.
 
 	// Always hoist main-level variables to the top of main() so that:
 	//   1. No goto can jump over a variable declaration (goto-over-declaration error).
@@ -451,8 +463,13 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 		out.WriteString("\n")
 	}
 
-	// main function.
+	// main function — delegates to rt.RunMain so the main OS thread is
+	// available for Ebitengine window creation (required by macOS).
 	out.WriteString("func main() {\n")
+	out.WriteString("\trt.RunMain(basicMain)\n")
+	out.WriteString("}\n\n")
+
+	out.WriteString("func basicMain() {\n")
 
 	// Close all files at program exit.
 	if g.needFileManager {
@@ -481,6 +498,12 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 		out.WriteString("\n")
 	}
 
+	// Emit GOSUB return-address variable if any GOSUB statements exist.
+	if g.hasGosub {
+		out.WriteString("\tvar gosubReturnAddr int\n")
+		out.WriteString("\t_ = gosubReturnAddr\n\n")
+	}
+
 	out.Write(g.buf.Bytes())
 	out.WriteString("}\n")
 
@@ -504,13 +527,27 @@ func (g *CodeGenerator) Generate(program *ast.Program, table *semantic.SymbolTab
 //     compile error, so emitting unreferenced labels would break the output.
 //   - Collect DATA values into the dataPool for READ statement access.
 func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
+	// lastLabel tracks the most recent label or line number, so we can
+	// associate it with the first DATA statement that follows it.
+	// This allows RESTORE <label> to jump to the correct dataPool index.
+	lastLabel := ""
+	lastLabelUsed := false
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.LabelStatement:
 			g.labelMap[strings.ToUpper(s.Name)] = true
+			lastLabel = strings.ToUpper(s.Name)
+			lastLabelUsed = false
 		case *ast.LineNumberStatement:
 			g.labelMap[fmt.Sprintf("%d", s.Number)] = true
+			lastLabel = fmt.Sprintf("%d", s.Number)
+			lastLabelUsed = false
 		case *ast.DataStatement:
+			// Record label → dataPool index for RESTORE <label>.
+			if lastLabel != "" && !lastLabelUsed {
+				g.dataLabelMap[lastLabel] = len(g.dataPool)
+				lastLabelUsed = true
+			}
 			g.dataPool = append(g.dataPool, s.Values...)
 		case *ast.ReadStatement:
 			if !s.IsInput {
@@ -524,6 +561,8 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			g.referencedLabels[strings.ToUpper(s.Target)] = true
 		case *ast.GosubStatement:
 			g.referencedLabels[strings.ToUpper(s.Target)] = true
+			g.hasGosub = true
+			g.gosubTotalCallSites++
 		case *ast.OnErrorGotoStatement:
 			if s.Target != "0" && s.Target != "" {
 				key := strings.ToUpper(s.Target)
@@ -542,6 +581,8 @@ func (g *CodeGenerator) collectLabelsAndData(stmts []ast.Statement) {
 			for _, t := range s.Targets {
 				g.referencedLabels[strings.ToUpper(t)] = true
 			}
+			g.hasGosub = true
+			g.gosubTotalCallSites++
 
 		// Recurse into nested blocks.
 		case *ast.IfStatement:

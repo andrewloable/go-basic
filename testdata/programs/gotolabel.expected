@@ -13,6 +13,13 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	rt.RunMain(basicMain)
+}
+
+func basicMain() {
+	var gosubReturnAddr int
+	_ = gosubReturnAddr
+
 	// Test GOTO and labels
 	fmt.Println("Start")
 	goto label_skip
@@ -20,12 +27,16 @@ func main() {
 label_skip:
 	fmt.Println("After skip")
 	//  Test GOSUB/RETURN
+	gosubReturnAddr = 1
 	goto label_greet // GOSUB
+	label_gosubReturn_1:
 	fmt.Println("Back from GOSUB")
 	goto label_done
 label_greet:
 	fmt.Println("Hello from GOSUB!")
-	return // RETURN
+	switch gosubReturnAddr { // RETURN
+	case 1: goto label_gosubReturn_1
+	}
 label_done:
 	fmt.Println("Done")
 	os.Exit(0)

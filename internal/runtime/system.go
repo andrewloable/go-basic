@@ -52,6 +52,15 @@ func Delay(seconds float64) {
 	time.Sleep(time.Duration(seconds * float64(time.Second)))
 }
 
+// LoopYield inserts a 1ms pause in tight loops (DO/LOOP, WHILE/WEND).
+// Compiled Go runs orders of magnitude faster than interpreted BASIC, so
+// busy-wait loops that calibrate timing (like GORILLA.BAS's CalcDelay)
+// would produce absurdly large values without this throttle. The 1ms
+// sleep also prevents tight loops from consuming 100% CPU.
+func LoopYield() {
+	time.Sleep(time.Millisecond)
+}
+
 // DateStr returns the current date as "MM-DD-YYYY" (BASIC's DATE$).
 func DateStr() string {
 	return time.Now().Format("01-02-2006")

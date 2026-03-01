@@ -15,6 +15,10 @@ var _ = os.Exit
 var _ = rt.Abs
 
 func main() {
+	rt.RunMain(basicMain)
+}
+
+func basicMain() {
 	// Test math functions
 	fmt.Println("ABS(-5):   ", rt.Abs(float64((-5))))
 	fmt.Println("SGN(-3):   ", rt.Sgn(float64((-3))))

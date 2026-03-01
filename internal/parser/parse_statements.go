@@ -381,12 +381,15 @@ func (p *Parser) parseStatement() ast.Statement {
 	case lexer.TOKEN_WIDTH:
 		pos := p.curPos()
 		p.nextToken() // skip WIDTH
-		// WIDTH col [, row] — set console/screen width; consumed but emitted as no-op
-		p.parseExpression(PREC_LOWEST)
+		// WIDTH col [, row] — set text dimensions; currently a no-op
+		cols := p.parseExpression(PREC_LOWEST)
+		var rows ast.Expression
 		if p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken()
-			p.parseExpression(PREC_LOWEST)
+			rows = p.parseExpression(PREC_LOWEST)
 		}
+		_ = cols
+		_ = rows
 		return &ast.RemStatement{BasePos: pos, Text: "WIDTH"}
 	case lexer.TOKEN_DELAY:
 		return p.parseDelayStatement()

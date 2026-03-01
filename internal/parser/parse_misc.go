@@ -79,8 +79,17 @@ func (p *Parser) parseWindowStatement() ast.Statement {
 func (p *Parser) parsePaletteStatement() ast.Statement {
 	pos := p.curPos()
 	p.nextToken() // skip PALETTE
-	p.skipToEndOfLine()
-	return &ast.RemStatement{BasePos: pos, Text: "PALETTE"}
+	// PALETTE with no args resets palette (emit as no-op).
+	if p.curTokenIs(lexer.TOKEN_EOL) || p.curTokenIs(lexer.TOKEN_EOF) || p.curTokenIs(lexer.TOKEN_COLON) {
+		return &ast.RemStatement{BasePos: pos, Text: "PALETTE (reset)"}
+	}
+	// PALETTE index, color
+	index := p.parseExpression(PREC_LOWEST)
+	if p.curTokenIs(lexer.TOKEN_COMMA) {
+		p.nextToken()
+	}
+	color := p.parseExpression(PREC_LOWEST)
+	return &ast.PaletteStatement{BasePos: pos, Index: index, Color: color}
 }
 
 // parseIdentifierStatement handles bare identifiers (assignments or sub-calls).

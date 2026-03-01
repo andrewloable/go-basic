@@ -151,23 +151,36 @@ func (g *CodeGenerator) emitRead(s *ast.ReadStatement) {
 	// DATA READ: read from the compile-time data pool.
 	for _, v := range s.Variables {
 		varExpr := g.emitExpr(v)
-		if ident, ok := v.(*ast.Identifier); ok {
-			name := mangleName(ident.Name + ident.TypeSuffix)
+
+		// Determine the Go type from the variable expression.
+		goT := ""
+		isStr := false
+		switch vt := v.(type) {
+		case *ast.Identifier:
+			name := mangleName(vt.Name + vt.TypeSuffix)
 			if !g.declared[name] {
-				goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
+				goT = g.goTypeForIdent(vt.Name + vt.TypeSuffix)
 				g.writeLinef("var %s %s", name, goT)
 				g.declared[name] = true
 			}
-			goT := g.goTypeForIdent(ident.Name + ident.TypeSuffix)
-			if isStringType(ident.Name + ident.TypeSuffix) {
-				g.writeLinef("%s = fmt.Sprint(dataPool[dataIdx]); dataIdx++", varExpr)
-			} else {
-				// Cast tv_ to the target type to satisfy Go's strict type system.
-				g.imports["fmt"] = true
-				g.writeLinef("{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: %s = %s(tv_); case int: %s = %s(float64(tv_)); case string: %s = %s(rt.Val(tv_)); default: _ = tv_ } }", varExpr, goT, varExpr, goT, varExpr, goT)
-			}
-		} else {
+			goT = g.goTypeForIdent(vt.Name + vt.TypeSuffix)
+			isStr = isStringType(vt.Name + vt.TypeSuffix)
+		case *ast.ArrayAccess:
+			goT = g.goTypeForIdent(vt.Name + vt.TypeSuffix)
+			isStr = isStringType(vt.Name + vt.TypeSuffix)
+		}
+
+		if goT == "" {
+			// Unknown target — discard (should not happen in practice).
 			g.writeLinef("_ = dataPool[dataIdx]; dataIdx++ // READ into %s", varExpr)
+			continue
+		}
+
+		if isStr {
+			g.writeLinef("%s = fmt.Sprint(dataPool[dataIdx]); dataIdx++", varExpr)
+		} else {
+			g.imports["fmt"] = true
+			g.writeLinef("{ v_ := dataPool[dataIdx]; dataIdx++; switch tv_ := v_.(type) { case float64: %s = %s(tv_); case int: %s = %s(float64(tv_)); case string: %s = %s(rt.Val(tv_)); default: _ = tv_ } }", varExpr, goT, varExpr, goT, varExpr, goT)
 		}
 	}
 }

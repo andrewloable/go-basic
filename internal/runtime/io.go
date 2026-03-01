@@ -794,22 +794,47 @@ func Spc(n int) string {
 // The returned string is the raw line with the trailing newline stripped; the
 // generated code then converts it to the variable's target type.
 func InputPrompt(prompt string) string {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print(prompt)
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			// On EOF or error, return whatever we have.
-			return strings.TrimRight(line, "\r\n")
-		}
-		line = strings.TrimRight(line, "\r\n")
-		return line
+	fmt.Print(prompt)
+	if IsGraphicsWindowOpen() {
+		return GraphicsReadLine()
 	}
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return strings.TrimRight(line, "\r\n")
+	}
+	return strings.TrimRight(line, "\r\n")
 }
 
-// NewScanner creates a new bufio.Scanner that reads from os.Stdin.
-// This is used by the generated code for INPUT and LINE INPUT statements.
-func NewScanner() *bufio.Scanner {
+// InputScanner is an interface that provides Scan/Text methods for INPUT.
+// When the graphics window is open, a GraphicsLineScanner is used instead
+// of bufio.Scanner so that keyboard input comes from the Ebitengine key buffer.
+type InputScanner interface {
+	Scan() bool
+	Text() string
+}
+
+// GraphicsLineScanner reads one line from the Ebitengine key buffer.
+type GraphicsLineScanner struct {
+	line string
+}
+
+func (s *GraphicsLineScanner) Scan() bool {
+	s.line = GraphicsReadLine()
+	return true
+}
+
+func (s *GraphicsLineScanner) Text() string {
+	return s.line
+}
+
+// NewScanner creates a scanner for INPUT/LINE INPUT statements.
+// When the graphics window is open, returns a GraphicsLineScanner that reads
+// from the Ebitengine key buffer. Otherwise returns a bufio.Scanner for stdin.
+func NewScanner() InputScanner {
+	if IsGraphicsWindowOpen() {
+		return &GraphicsLineScanner{}
+	}
 	return bufio.NewScanner(os.Stdin)
 }
 
@@ -823,9 +848,14 @@ func NewScanner() *bufio.Scanner {
 // corresponding variable. The generated code calls InputSplitLine() once and
 // then indexes the returned slice — one element per variable in the INPUT list.
 func InputSplitLine() []string {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	line := scanner.Text()
+	var line string
+	if IsGraphicsWindowOpen() {
+		line = GraphicsReadLine()
+	} else {
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		line = scanner.Text()
+	}
 	parts := strings.Split(line, ",")
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])
@@ -842,9 +872,70 @@ func AnsiLocate(row, col int) string {
 
 // AnsiCls returns the ANSI escape sequence that clears the terminal screen
 // and moves the cursor to the top-left corner (home position).
-// Generated code emits fmt.Print(rt.AnsiCls()) for the BASIC CLS statement.
 func AnsiCls() string {
 	return "\033[2J\033[H"
+}
+
+// Cls implements the BASIC CLS statement.
+//
+//	CLS 0 (or no arg) — clear everything (graphics framebuffer + text)
+//	CLS 1             — clear graphics framebuffer only
+//	CLS 2             — clear text viewport area of the graphics framebuffer
+//
+// In text mode (SCREEN 0), CLS sends ANSI clear. In graphics modes,
+// CLS clears the appropriate portion of the framebuffer and/or text buffer
+// directly (without going through the pipe, which would trigger a redundant
+// ClearScreen via the text writer's \033[2J handler).
+func Cls(mode int) {
+	s := CurrentScreen
+	if s.Framebuffer != nil {
+		switch mode {
+		case 0:
+			// Clear entire framebuffer.
+			for y := 0; y < s.Height; y++ {
+				for x := 0; x < s.Width; x++ {
+					s.Framebuffer[y][x] = 0
+				}
+			}
+			// Also clear the text buffer directly (no ANSI pipe).
+			if TextBuf != nil {
+				TextBuf.Clear()
+			}
+		case 1:
+			// Clear graphics only.
+			for y := 0; y < s.Height; y++ {
+				for x := 0; x < s.Width; x++ {
+					s.Framebuffer[y][x] = 0
+				}
+			}
+		case 2:
+			// Clear the text viewport region of the framebuffer.
+			// VIEW PRINT top TO bottom defines text rows (1-based).
+			top := s.TextTop
+			bottom := s.TextBottom
+			if top == 0 && bottom == 0 {
+				top = 1
+				bottom = 25
+			}
+			charH := s.Height / 25
+			if charH < 1 {
+				charH = 1
+			}
+			py1 := (top - 1) * charH
+			py2 := bottom * charH
+			if py2 > s.Height {
+				py2 = s.Height
+			}
+			for y := py1; y < py2; y++ {
+				for x := 0; x < s.Width; x++ {
+					s.Framebuffer[y][x] = 0
+				}
+			}
+		}
+		return
+	}
+	// Text mode (no framebuffer): send ANSI clear.
+	fmt.Print(AnsiCls())
 }
 
 // AnsiColor returns the ANSI SGR escape sequence for the given BASIC color codes.

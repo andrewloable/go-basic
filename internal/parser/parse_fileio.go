@@ -299,35 +299,37 @@ func (p *Parser) parseGetStatement() ast.Statement {
 	// Graphics GET: GET (x1, y1)-(x2, y2), arrayVar
 	// File GET:     GET [#]filenum [, recnum] [, variable]
 	if p.curTokenIs(lexer.TOKEN_LPAREN) {
-		// Graphics GET — consume (x1, y1)-(x2, y2), array and emit as no-op
+		// Graphics GET — parse (x1, y1)-(x2, y2), arrayVar
 		p.nextToken() // skip (
-		p.parseExpression(PREC_LOWEST) // x1
+		x1 := p.parseExpression(PREC_LOWEST)
 		if p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken()
 		}
-		p.parseExpression(PREC_LOWEST) // y1
+		y1 := p.parseExpression(PREC_LOWEST)
 		if p.curTokenIs(lexer.TOKEN_RPAREN) {
 			p.nextToken() // skip )
 		}
 		if p.curTokenIs(lexer.TOKEN_MINUS) {
-			p.nextToken() // skip - (step separator)
+			p.nextToken() // skip -
 		}
+		var x2, y2 ast.Expression
 		if p.curTokenIs(lexer.TOKEN_LPAREN) {
 			p.nextToken() // skip (
-			p.parseExpression(PREC_LOWEST) // x2
+			x2 = p.parseExpression(PREC_LOWEST)
 			if p.curTokenIs(lexer.TOKEN_COMMA) {
 				p.nextToken()
 			}
-			p.parseExpression(PREC_LOWEST) // y2
+			y2 = p.parseExpression(PREC_LOWEST)
 			if p.curTokenIs(lexer.TOKEN_RPAREN) {
 				p.nextToken() // skip )
 			}
 		}
+		var arrayVar ast.Expression
 		if p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken()
-			p.parseExpression(PREC_LOWEST) // arrayVar
+			arrayVar = p.parseExpression(PREC_LOWEST)
 		}
-		return &ast.RemStatement{BasePos: pos, Text: "GET (graphics)"}
+		return &ast.GraphicsGetStatement{BasePos: pos, X1: x1, Y1: y1, X2: x2, Y2: y2, ArrayVar: arrayVar}
 	}
 
 	if p.curTokenIs(lexer.TOKEN_HASH) {
@@ -365,30 +367,27 @@ func (p *Parser) parsePutStatement() ast.Statement {
 		if p.curTokenIs(lexer.TOKEN_RPAREN) {
 			p.nextToken() // skip )
 		}
-		var arrayVar, mode ast.Expression
+		var arrayVar ast.Expression
 		if p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken()
 			arrayVar = p.parseExpression(PREC_LOWEST)
 		}
+		action := "XOR" // default action verb
 		if p.curTokenIs(lexer.TOKEN_COMMA) {
 			p.nextToken()
-			// Graphics mode is a keyword (PSET, PRESET, AND, OR, XOR) — not a normal
-			// expression, so consume the token directly rather than calling parseExpression.
 			switch p.curToken.Type {
 			case lexer.TOKEN_PSET, lexer.TOKEN_PRESET, lexer.TOKEN_AND, lexer.TOKEN_OR, lexer.TOKEN_XOR:
-				modeIdent := &ast.Identifier{BasePos: p.curPos(), Name: p.curToken.Literal}
-				mode = modeIdent
+				action = strings.ToUpper(p.curToken.Literal)
 				p.nextToken()
 			default:
-				mode = p.parseExpression(PREC_LOWEST)
+				// Try to read as identifier
+				expr := p.parseExpression(PREC_LOWEST)
+				if id, ok := expr.(*ast.Identifier); ok {
+					action = strings.ToUpper(id.Name)
+				}
 			}
 		}
-		// Emit as a no-op graphics statement (not yet implemented in transpiler)
-		_ = x
-		_ = y
-		_ = arrayVar
-		_ = mode
-		return &ast.RemStatement{BasePos: pos, Text: "PUT (graphics)"}
+		return &ast.GraphicsPutStatement{BasePos: pos, X: x, Y: y, ArrayVar: arrayVar, Action: action}
 	}
 
 	// File PUT
