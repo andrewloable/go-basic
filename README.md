@@ -27,10 +27,18 @@ func main() {
 }
 ```
 
+## In Action
+
+The classic QBasic Gorillas game, compiled from the original `.bas` source and running as a native Go binary:
+
+![QBasic Gorillas running via go-basic](images/gorillas.gif)
+
 ## Features
 
 - Full Turbo BASIC / QBasic parser — handles real-world programs including the classic QBasic Gorillas game
 - Go source code output — generates standalone, compilable `.go` files
+- Graphics runtime — SCREEN modes, sprites (GET/PUT), CIRCLE, LINE, PAINT, DRAW, PALETTE
+- Audio support — SOUND and PLAY commands
 - Bytecode VM — alternative backend that interprets programs directly
 - Runtime library — Go implementations of BASIC builtins (`LEFT$`, `MID$`, `SIN`, `PRINT USING`, etc.)
 - Educational codebase — extensively commented to explain how compilers work
@@ -49,39 +57,121 @@ func main() {
 | String functions | `LEFT$`, `RIGHT$`, `MID$`, `CHR$`, `ASC`, `STR$`, `VAL`, `INSTR`, `UCASE$`, `LCASE$`, `LTRIM$`, `RTRIM$`, `HEX$`, `OCT$`, `BIN$`, `STRING$`, `SPACE$` |
 | Math functions | `ABS`, `SGN`, `INT`, `FIX`, `SQR`, `SIN`, `COS`, `TAN`, `ATN`, `EXP`, `LOG`, `RND`, `CINT`, `CLNG`, `CSNG`, `CDBL` |
 | User types | `TYPE...END TYPE` with field access |
-| Graphics | `SCREEN`, `CIRCLE`, `LINE`, `PSET`, `PAINT`, `DRAW`, `VIEW`, `WINDOW` (stubs) |
-| Sound | `SOUND`, `PLAY` (stubs) |
+| Graphics | `SCREEN`, `CIRCLE`, `LINE`, `PSET`, `PRESET`, `PAINT`, `DRAW`, `GET`, `PUT`, `PALETTE`, `COLOR`, `VIEW`, `WINDOW`, `CLS` |
+| Sound | `SOUND`, `PLAY` |
 | Turbo BASIC extensions | `DO/LOOP`, `EXIT`, `SELECT CASE`, `INCR/DECR`, `$DYNAMIC`, `$IF/$ENDIF` |
 
 ## Quick Start
 
 ### Prerequisites
 
-- [Go 1.21+](https://go.dev/dl/)
+- [Go 1.24+](https://go.dev/dl/)
+
+#### Platform Dependencies
+
+The graphics and audio runtime uses [Ebiten](https://ebitengine.org/) and [Oto](https://github.com/ebitengine/oto). On most systems these work out of the box, but Linux requires a few system packages:
+
+**macOS** — No extra dependencies needed.
+
+**Windows** — No extra dependencies needed.
+
+**Linux (Debian/Ubuntu)**:
+```bash
+sudo apt-get install libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+```
+
+**Linux (Fedora)**:
+```bash
+sudo dnf install mesa-libGL-devel libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel libXxf86vm-devel alsa-lib-devel pkg-config
+```
 
 ### Build
 
 ```bash
 git clone https://github.com/loabletech/go-basic.git
 cd go-basic
-go build ./cmd/basicc/
-```
-
-### Transpile a BASIC Program
-
-```bash
-# Transpile to Go
-./basicc transpile path/to/program.bas
-
-# The output is written to examples/program.go
-# Compile and run it
-go run examples/program.go
+go build -o go-basic .
 ```
 
 ### Run Tests
 
 ```bash
 go test ./...
+```
+
+## Usage
+
+```
+go-basic transpile <file.bas>                Transpile to Go source (stdout)
+go-basic transpile <file.bas> -o <file.go>   Transpile and write to a file
+go-basic compile <file.bas>                  Compile to executable binary
+go-basic compile <file.bas> -o <output>      Compile with custom output name
+go-basic help                                Show detailed help
+```
+
+### Commands
+
+#### `compile` — Compile a BASIC program to a native binary
+
+Transpiles the `.bas` file to Go and builds it into a standalone executable in one step. The output binary name defaults to the input filename without the extension.
+
+```bash
+# Compile gorilla.bas → ./gorilla
+./go-basic compile examples/gorilla.bas
+
+# Compile with a custom output name
+./go-basic compile examples/gorilla.bas -o mygame
+
+# Run the compiled program
+./gorilla
+```
+
+#### `transpile` — Transpile to Go source code
+
+Generates Go source code from a BASIC program. Useful for inspecting the generated code, making manual edits, or integrating into a larger Go project.
+
+```bash
+# Print generated Go source to stdout
+./go-basic transpile examples/gorilla.bas
+
+# Write to a file
+./go-basic transpile examples/gorilla.bas -o gorilla.go
+
+# Redirect to a file
+./go-basic transpile examples/gorilla.bas > gorilla.go
+```
+
+#### `help` — Show detailed help
+
+Displays the full help including all supported BASIC features, screen modes, and examples.
+
+```bash
+./go-basic help
+```
+
+### Supported Screen Modes
+
+| Mode | Resolution | Colors | Hardware Origin |
+|------|-----------|--------|-----------------|
+| SCREEN 0 | Text 80x25 | 16 | Text mode |
+| SCREEN 1 | 320x200 | 4 | CGA |
+| SCREEN 2 | 640x200 | 2 | CGA |
+| SCREEN 7 | 320x200 | 16 | EGA |
+| SCREEN 9 | 640x350 | 16 | EGA |
+| SCREEN 12 | 640x480 | 16 | VGA |
+| SCREEN 13 | 320x200 | 256 | VGA/MCGA |
+
+### Manual Build Workflow
+
+If you prefer to transpile and build separately (e.g., to customize the Go code before compiling):
+
+```bash
+mkdir myproject && cd myproject
+go mod init myapp
+../go-basic transpile ../examples/gorilla.bas -o main.go
+go mod edit -require github.com/loabletech/go-basic@latest
+go build -o myapp .
+./myapp
 ```
 
 ## How It Works
@@ -109,7 +199,7 @@ Source (.bas)  →  Lexer  →  Parser  →  Semantic Analysis  →  Code Genera
 ## Project Structure
 
 ```
-cmd/basicc/           CLI tool
+main.go               CLI entry point (transpile / compile)
 internal/
   lexer/              Tokenizer
   parser/             Recursive descent + Pratt parser
@@ -122,47 +212,39 @@ internal/
     strings.go        LEFT$, MID$, CHR$, STR$, etc.
     io.go             PRINT helpers, formatting
     fileio.go         File I/O (OPEN, CLOSE, PRINT#, etc.)
+    graphics.go       SCREEN, PSET, LINE, CIRCLE, PAINT, GET/PUT, etc.
     system.go         TIMER, DATE$, ENVIRON$, etc.
     errors.go         ON ERROR / RESUME support
   integration/        End-to-end tests
   benchmark/          Performance benchmarks
-testdata/bas/         65 BASIC test programs
-examples/             Generated Go output
+examples/             BASIC source programs and generated Go output
 docs/                 Documentation
+images/               Screenshots and demos
 ```
 
 ## Current Status
 
 | Metric | Count |
 |--------|-------|
-| Test programs | 65 (all parse successfully) |
-| Generated Go files that compile | 15 / 65 |
+| Example programs | 65 (all parse successfully) |
+| Generated Go files that compile | 64 / 65 |
 | Test packages passing | 10 / 10 |
 | Parser regression tests | 24 |
 
-Active work is focused on fixing the code generator to handle strict Go typing, builtin function emission, and procedure translation. See the [project docs](docs/project.md) for details.
-
 ## Examples
 
-The `testdata/bas/` directory contains 65 BASIC programs covering everything from hello world to the QBasic Gorillas game. Each has a corresponding generated `.go` file in `examples/`.
+The `examples/` directory contains BASIC programs covering everything from hello world to the QBasic Gorillas game.
 
 ```bash
 # Try these
-./basicc transpile testdata/bas/hello.bas
-./basicc transpile testdata/bas/fibonacci.bas
-./basicc transpile testdata/bas/gorilla.bas
+./go-basic compile examples/gorilla.bas
+./go-basic compile examples/circle_draw.bas
+./go-basic compile examples/fibonacci.bas
 ```
 
 ## Contributing
 
-Contributions are welcome. The biggest areas where help is needed:
-
-1. **Codegen type casting** — Making the Go output handle BASIC's loose typing correctly
-2. **Builtin functions** — Getting all string/math builtins to emit proper `rt.*` calls
-3. **File I/O** — Wiring the existing runtime FileManager into the code generator
-4. **Graphics backend** — Replacing stubs with a real graphics library (ebiten, SDL2, etc.)
-
-The codebase is extensively commented to explain compiler concepts. Start with `internal/lexer/token.go` and follow the pipeline.
+Contributions are welcome. The codebase is extensively commented to explain compiler concepts. Start with `internal/lexer/token.go` and follow the pipeline.
 
 ## Learning Compiler Design
 
