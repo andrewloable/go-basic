@@ -26,3 +26,6 @@ Thumbs.db
 .doltcfg/
 beads_go-basic/
 config.yaml
+
+# Dolt database files (added by bd init)
+*.db
