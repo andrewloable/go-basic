@@ -1176,3 +1176,239 @@ func TestLofNotOpen(t *testing.T) {
 		t.Error("expected error for Lof on closed file")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FileClose flushes written data
+// ---------------------------------------------------------------------------
+
+func TestFileCloseFlushWrittenData(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "flush.txt")
+
+	err := fm.FileOpen(1, path, FileModeOutput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	if err := fm.FilePrint(1, "hello\n"); err != nil {
+		t.Fatalf("FilePrint: %v", err)
+	}
+	if err := fm.FileClose(1); err != nil {
+		t.Fatalf("FileClose: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "hello") {
+		t.Errorf("file content = %q, want to contain %q", string(data), "hello")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RandomGet with invalid file number
+// ---------------------------------------------------------------------------
+
+func TestRandomGetNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.RandomGet(99, 1)
+	if err == nil {
+		t.Fatal("expected error for RandomGet on non-open file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RandomGet on non-random file
+// ---------------------------------------------------------------------------
+
+func TestRandomGetWrongMode(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "rget_wrong.txt")
+
+	fm.FileOpen(1, path, FileModeOutput, 0)
+	defer fm.FileClose(1)
+
+	err := fm.RandomGet(1, 1)
+	if err == nil {
+		t.Fatal("expected error for RandomGet on non-random file")
+	}
+	if !strings.Contains(err.Error(), "random") && !strings.Contains(err.Error(), "Random") {
+		t.Errorf("error = %q, want mention of random mode", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BinaryGet with invalid file number
+// ---------------------------------------------------------------------------
+
+func TestBinaryGetNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	_, err := fm.BinaryGet(99, 1, 10)
+	if err == nil {
+		t.Fatal("expected error for BinaryGet on non-open file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BinaryGet on non-binary file
+// ---------------------------------------------------------------------------
+
+func TestBinaryGetWrongMode(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "bget_wrong.txt")
+
+	fm.FileOpen(1, path, FileModeOutput, 0)
+	defer fm.FileClose(1)
+
+	_, err := fm.BinaryGet(1, 1, 10)
+	if err == nil {
+		t.Fatal("expected error for BinaryGet on non-binary file")
+	}
+	if !strings.Contains(err.Error(), "binary") {
+		t.Errorf("error = %q, want mention of binary mode", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BinaryGet reading past EOF returns partial data
+// ---------------------------------------------------------------------------
+
+func TestBinaryGetPastEOF(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "bget_eof.dat")
+
+	// Write exactly 5 bytes.
+	if err := os.WriteFile(path, []byte("ABCDE"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeBinary, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	// Request 100 bytes starting at pos 1 (0-based offset 0).
+	data, err := fm.BinaryGet(1, 1, 100)
+	if err != nil {
+		t.Fatalf("BinaryGet past EOF should not error, got: %v", err)
+	}
+	if len(data) != 5 {
+		t.Errorf("BinaryGet past EOF: got %d bytes, want 5", len(data))
+	}
+	if string(data) != "ABCDE" {
+		t.Errorf("BinaryGet past EOF: data = %q, want %q", string(data), "ABCDE")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FileSeekPos with invalid file number
+// ---------------------------------------------------------------------------
+
+func TestFileSeekPosNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	_, err := fm.FileSeekPos(99)
+	if err == nil {
+		t.Fatal("expected error for FileSeekPos on non-open file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Eof on empty file returns true
+// ---------------------------------------------------------------------------
+
+func TestEofOnEmptyFile(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "empty.txt")
+
+	// Create an empty file.
+	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeInput, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	eof, err := fm.Eof(1)
+	if err != nil {
+		t.Fatalf("Eof: %v", err)
+	}
+	if !eof {
+		t.Error("Eof on empty file should return true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Eof in binary mode preserves file position
+// ---------------------------------------------------------------------------
+
+func TestEofBinaryModeSeekRestore(t *testing.T) {
+	fm := NewFileManager()
+	path := tempFile(t, "eof_binary.dat")
+
+	// Write 10 bytes.
+	if err := os.WriteFile(path, []byte("0123456789"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := fm.FileOpen(1, path, FileModeBinary, 0)
+	if err != nil {
+		t.Fatalf("FileOpen: %v", err)
+	}
+	defer fm.FileClose(1)
+
+	// Read 3 bytes from position 1 to advance the position to offset 3.
+	_, err = fm.BinaryGet(1, 1, 3)
+	if err != nil {
+		t.Fatalf("BinaryGet: %v", err)
+	}
+
+	// Record position before Eof call.
+	posBefore, err := fm.FileSeekPos(1)
+	if err != nil {
+		t.Fatalf("FileSeekPos before: %v", err)
+	}
+
+	// Call Eof — should be false (not at end).
+	eof, err := fm.Eof(1)
+	if err != nil {
+		t.Fatalf("Eof: %v", err)
+	}
+	if eof {
+		t.Error("Eof should be false when not at end of file")
+	}
+
+	// Position should be restored.
+	posAfter, err := fm.FileSeekPos(1)
+	if err != nil {
+		t.Fatalf("FileSeekPos after: %v", err)
+	}
+	if posBefore != posAfter {
+		t.Errorf("Eof changed file position: before=%d, after=%d", posBefore, posAfter)
+	}
+
+	// Verify we can still read from the restored position.
+	// FileSeekPos returns 1-based position, BinaryGet takes 1-based position.
+	data, err := fm.BinaryGet(1, posBefore, 3)
+	if err != nil {
+		t.Fatalf("BinaryGet after Eof: %v", err)
+	}
+	if string(data) != "345" {
+		t.Errorf("read after Eof = %q, want %q", string(data), "345")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FileCloseAll with no open files
+// ---------------------------------------------------------------------------
+
+func TestFileCloseNotOpen(t *testing.T) {
+	fm := NewFileManager()
+	err := fm.FileCloseAll()
+	if err != nil {
+		t.Errorf("FileCloseAll with no open files should return nil, got: %v", err)
+	}
+}

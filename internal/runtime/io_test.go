@@ -733,3 +733,97 @@ func TestFormatNumberScientificSmall(t *testing.T) {
 	result := FormatNumber("#.##^^^^", 0.0001234)
 	_ = result
 }
+
+// ---------------------------------------------------------------------------
+// TestValueToFloatAllTypes — cover missing type branches + fallback path
+// ---------------------------------------------------------------------------
+
+func TestValueToFloatAllTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		v    interface{}
+		want float64
+	}{
+		{"int8", int8(42), 42},
+		{"uint16", uint16(1000), 1000},
+		{"uint32", uint32(100000), 100000},
+		{"uint64", uint64(999999), 999999},
+		{"string numeric", "3.14", 3.14},
+		{"string non-numeric", "notanumber", 0},
+		{"bool true", true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := valueToFloat(tt.v)
+			if got != tt.want {
+				t.Errorf("valueToFloat(%v) = %g, want %g", tt.v, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestFormatScientificExactValues — exact output for various magnitudes
+// ---------------------------------------------------------------------------
+
+func TestFormatScientificExactValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		value  float64
+	}{
+		{"small number negative exponent", "#.##^^^^", 0.0001234},
+		{"large number", "#.##^^^^", 9999999.0},
+		{"exact one", "#.##^^^^", 1.0},
+		{"negative fraction", "#.##^^^^", -0.5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatNumber(tt.format, tt.value)
+			if !strings.Contains(got, "E") {
+				t.Errorf("FormatNumber(%q, %g) = %q, expected E notation", tt.format, tt.value, got)
+			}
+			if tt.value < 0 && !strings.Contains(got, "-") {
+				t.Errorf("FormatNumber(%q, %g) = %q, expected '-' for negative value", tt.format, tt.value, got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestFormatScientificAsteriskDollar — **$ prefix with scientific notation
+// ---------------------------------------------------------------------------
+
+func TestFormatScientificAsteriskDollar(t *testing.T) {
+	got := FormatNumber("**$#.##^^^^", 42.0)
+	if !strings.Contains(got, "$") {
+		t.Errorf("FormatNumber(\"**$#.##^^^^\", 42) = %q, expected '$'", got)
+	}
+	if !strings.Contains(got, "E") {
+		t.Errorf("FormatNumber(\"**$#.##^^^^\", 42) = %q, expected 'E' notation", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestFormatNumberCommaGrouping — comma thousands separator
+// ---------------------------------------------------------------------------
+
+func TestFormatNumberCommaGrouping(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		value  float64
+		substr string
+	}{
+		{"thousands", "#,###", 1234, "1,234"},
+		{"millions", "#,###,###", 1234567, "1,234,567"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatNumber(tt.format, tt.value)
+			if !strings.Contains(got, tt.substr) {
+				t.Errorf("FormatNumber(%q, %g) = %q, expected to contain %q", tt.format, tt.value, got, tt.substr)
+			}
+		})
+	}
+}

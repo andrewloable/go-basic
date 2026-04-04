@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/loabletech/go-basic/internal/ast"
+	"github.com/loabletech/go-basic/internal/lexer"
+	"github.com/loabletech/go-basic/internal/parser"
 	"github.com/loabletech/go-basic/internal/semantic"
 )
 
@@ -140,5 +142,107 @@ func TestEmitExprNil(t *testing.T) {
 	got := gen.emitExpr(nil)
 	if got != "0" {
 		t.Errorf("emitExpr(nil) = %q, want 0", got)
+	}
+}
+
+// generateFromSource runs the full pipeline (lexer → parser → semantic → codegen)
+// and returns the generated Go source code.
+func generateFromSource(t *testing.T, src string) string {
+	t.Helper()
+	l := lexer.New(src)
+	p := parser.New(l)
+	prog := p.ParseProgram()
+	if errs := p.Errors(); len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	resolver := semantic.NewResolver(prog)
+	table, _ := resolver.Resolve()
+	gen := New()
+	goSrc, err := gen.Generate(prog, table)
+	if err != nil {
+		t.Fatalf("codegen error: %v", err)
+	}
+	return goSrc
+}
+
+// ---------------------------------------------------------------------------
+// Tests for scanAssignedParams — indirect via full pipeline SUB generation
+// ---------------------------------------------------------------------------
+
+func TestScanAssignedParamsLet(t *testing.T) {
+	src := `SUB MySub(x)
+  x = 10
+  PRINT x
+END SUB
+`
+	out := generateFromSource(t, src)
+	// x is assigned to, so should be passed by pointer.
+	if !strings.Contains(out, "x *float32") {
+		t.Errorf("expected 'x *float32' for assigned param, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*x =") {
+		t.Errorf("expected '*x =' for pointer assignment, got:\n%s", out)
+	}
+}
+
+func TestScanAssignedParamsNoAssign(t *testing.T) {
+	src := `SUB MySub(x)
+  PRINT x
+END SUB
+`
+	out := generateFromSource(t, src)
+	// x is only read, should be passed by value (no pointer).
+	if strings.Contains(out, "x *float32") {
+		t.Errorf("expected value param (no pointer) for read-only param, got:\n%s", out)
+	}
+	if !strings.Contains(out, "x float32") {
+		t.Errorf("expected 'x float32' for value param, got:\n%s", out)
+	}
+}
+
+func TestScanAssignedParamsInNested(t *testing.T) {
+	src := `SUB MySub(x)
+  IF x > 0 THEN
+    x = x + 1
+  END IF
+  PRINT x
+END SUB
+`
+	out := generateFromSource(t, src)
+	// Assignment inside IF should still be detected.
+	if !strings.Contains(out, "x *float32") {
+		t.Errorf("expected 'x *float32' for param assigned in nested IF, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*x =") {
+		t.Errorf("expected '*x =' for pointer assignment inside IF, got:\n%s", out)
+	}
+}
+
+func TestScanAssignedParamsSwap(t *testing.T) {
+	src := `SUB MySub(a, b)
+  SWAP a, b
+  PRINT a; b
+END SUB
+`
+	out := generateFromSource(t, src)
+	// Both a and b are targets of SWAP, should be passed by pointer.
+	if !strings.Contains(out, "a *float32") {
+		t.Errorf("expected 'a *float32' for SWAP param, got:\n%s", out)
+	}
+	if !strings.Contains(out, "b *float32") {
+		t.Errorf("expected 'b *float32' for SWAP param, got:\n%s", out)
+	}
+}
+
+func TestScanAssignedParamsRead(t *testing.T) {
+	src := `SUB MySub(x)
+  READ x
+  PRINT x
+END SUB
+`
+	out := generateFromSource(t, src)
+	// READ into x should mark it as assigned, requiring pointer.
+	if !strings.Contains(out, "x *float32") {
+		t.Errorf("expected 'x *float32' for READ param, got:\n%s", out)
 	}
 }

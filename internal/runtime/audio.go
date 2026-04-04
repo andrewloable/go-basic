@@ -28,18 +28,6 @@ func Sound(freq, duration float64) {
 	sleepFn(time.Duration(durationSec * float64(time.Second)))
 }
 
-// noteFrequencies maps note names (C, D, E, F, G, A, B) to their base frequency
-// in octave 4 (middle octave) in Hz.
-var noteFrequencies = map[byte]float64{
-	'C': 261.63,
-	'D': 293.66,
-	'E': 329.63,
-	'F': 349.23,
-	'G': 392.00,
-	'A': 440.00,
-	'B': 493.88,
-}
-
 // halfStepsAboveC maps each natural note to the number of half-steps above C.
 var halfStepsAboveC = map[byte]int{
 	'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11,
@@ -50,7 +38,7 @@ func mmlNoteFreq(note byte, sharps int, octave int) float64 {
 	// Half-step offset from middle C (octave 4, C=0).
 	semitone := halfStepsAboveC[note] + sharps + (octave-4)*12
 	// A4 = 440 Hz; semitones relative to A4.
-	a4Semitone := halfStepsAboveC['A'] + (4-4)*12 // = 9 semitones above C4
+	a4Semitone := halfStepsAboveC['A'] // 9 semitones above C4
 	relToA4 := float64(semitone - a4Semitone)
 	return 440.0 * math.Pow(2, relToA4/12.0)
 }

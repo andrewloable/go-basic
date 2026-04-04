@@ -569,3 +569,196 @@ func TestViewPortStub(t *testing.T) {
 func TestViewPrintStub(t *testing.T) {
 	ViewPrint(1, 24) // should not panic
 }
+
+// ---------------------------------------------------------------------------
+// clampByte — table-driven
+// ---------------------------------------------------------------------------
+
+func TestClampByte(t *testing.T) {
+	tests := []struct {
+		name string
+		v    float64
+		want byte
+	}{
+		{"negative", -10, 0},
+		{"zero", 0.0, 0},
+		{"normal", 127.0, 127},
+		{"boundary 255", 255.0, 255},
+		{"over 255", 300.0, 255},
+		{"fractional", 127.7, 127}, // byte truncates fractional part
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clampByte(tt.v)
+			if got != tt.want {
+				t.Errorf("clampByte(%v) = %d, want %d", tt.v, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pset — color clamping
+// ---------------------------------------------------------------------------
+
+func TestPsetColorClamping(t *testing.T) {
+	ScreenMode(13)
+
+	// Negative color should clamp to 0
+	Pset(10, 10, -5)
+	got := CurrentScreen.Framebuffer[10][10]
+	if got != 0 {
+		t.Errorf("Pset(10,10,-5): fb[10][10] = %d, want 0", got)
+	}
+
+	// Color > 255 should clamp to 255
+	Pset(10, 10, 300)
+	got = CurrentScreen.Framebuffer[10][10]
+	if got != 255 {
+		t.Errorf("Pset(10,10,300): fb[10][10] = %d, want 255", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Circle — verify actual pixel output
+// ---------------------------------------------------------------------------
+
+func TestCirclePixelPlotted(t *testing.T) {
+	ScreenMode(13)
+	Circle(50, 50, 10, 5, 0, 0, 1.0)
+
+	fb := CurrentScreen.Framebuffer
+	// The right-most point of the circle (50+10, 50) should be color 5
+	if fb[50][60] != 5 {
+		t.Errorf("Circle pixel at (60,50): fb[50][60] = %d, want 5", fb[50][60])
+	}
+
+	// Count pixels at roughly radius distance that are set to color 5
+	count := 0
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 320; x++ {
+			if fb[y][x] == 5 {
+				count++
+			}
+		}
+	}
+	if count == 0 {
+		t.Error("Circle drew zero pixels with color 5")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Paint — edge cases
+// ---------------------------------------------------------------------------
+
+func TestPaintOnBorderColor(t *testing.T) {
+	ScreenMode(13)
+	// Draw a box with border color 1
+	DrawLine(0, 0, 10, 10, 1, "B")
+
+	// (5, 0) is ON the border (top edge)
+	Paint(5, 0, 2, 1)
+
+	// Interior pixel (5, 5) should still be 0 — paint started on border, so no fill
+	if CurrentScreen.Framebuffer[5][5] != 0 {
+		t.Errorf("PaintOnBorder: fb[5][5] = %d, want 0 (should not fill when starting on border)",
+			CurrentScreen.Framebuffer[5][5])
+	}
+}
+
+func TestPaintAlreadyFilled(t *testing.T) {
+	ScreenMode(13)
+	// Pre-set the start pixel to the fill color
+	CurrentScreen.Framebuffer[50][50] = 2
+
+	// Paint with fillColor=2 starting on a pixel that is already 2
+	Paint(50, 50, 2, 1)
+
+	// Neighboring pixels should remain 0 — no flood fill should occur
+	if CurrentScreen.Framebuffer[50][51] != 0 {
+		t.Errorf("PaintAlreadyFilled: fb[50][51] = %d, want 0 (should not flood fill)",
+			CurrentScreen.Framebuffer[50][51])
+	}
+}
+
+func TestPaintOutOfBounds(t *testing.T) {
+	ScreenMode(13)
+	// These must not panic
+	Paint(-1, -1, 2, 1)
+	Paint(999, 999, 2, 1)
+}
+
+// ---------------------------------------------------------------------------
+// ViewPort — reversed coords and border-only
+// ---------------------------------------------------------------------------
+
+func TestViewPortReversedCoords(t *testing.T) {
+	ScreenMode(13)
+	// Reversed: x1>x2, y1>y2 — fill color 5, no border
+	ViewPort(20, 20, 10, 10, 5, -1)
+
+	// Interior pixel should be filled with color 5
+	fb := CurrentScreen.Framebuffer
+	if fb[15][15] != 5 {
+		t.Errorf("ViewPortReversed: fb[15][15] = %d, want 5", fb[15][15])
+	}
+}
+
+func TestViewPortBorderOnly(t *testing.T) {
+	ScreenMode(13)
+	// No fill (-1), border color 3
+	ViewPort(10, 10, 20, 20, -1, 3)
+
+	fb := CurrentScreen.Framebuffer
+	// A pixel on the top border should be color 3
+	if fb[10][15] != 3 {
+		t.Errorf("ViewPortBorderOnly: fb[10][15] = %d, want 3", fb[10][15])
+	}
+	// Interior should remain 0 (no fill)
+	if fb[15][15] != 0 {
+		t.Errorf("ViewPortBorderOnly: fb[15][15] = %d, want 0 (no fill)", fb[15][15])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Draw — M with absolute coords to origin
+// ---------------------------------------------------------------------------
+
+func TestDrawMoveNegative(t *testing.T) {
+	ScreenMode(13)
+	CurrentScreen.CursorX = 50
+	CurrentScreen.CursorY = 50
+	CurrentScreen.DrawAngle = 0
+	CurrentScreen.DrawScale = 1
+	CurrentScreen.DrawColor = 1
+
+	Draw("M0,0") // absolute move to origin
+	if CurrentScreen.CursorX != 0 || CurrentScreen.CursorY != 0 {
+		t.Errorf("Draw M0,0: cursor=(%d,%d), want (0,0)",
+			CurrentScreen.CursorX, CurrentScreen.CursorY)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ScreenMode — FgColor / BgColor initialization
+// ---------------------------------------------------------------------------
+
+func TestScreenModeInitColors(t *testing.T) {
+	// Mode 13: 256 colors, FgColor should be 255
+	ScreenMode(13)
+	if CurrentScreen.FgColor != 255 {
+		t.Errorf("ScreenMode(13): FgColor = %d, want 255", CurrentScreen.FgColor)
+	}
+	if CurrentScreen.BgColor != 0 {
+		t.Errorf("ScreenMode(13): BgColor = %d, want 0", CurrentScreen.BgColor)
+	}
+
+	// Mode 1: 4 colors, FgColor should be 3
+	ScreenMode(1)
+	if CurrentScreen.FgColor != 3 {
+		t.Errorf("ScreenMode(1): FgColor = %d, want 3", CurrentScreen.FgColor)
+	}
+	if CurrentScreen.BgColor != 0 {
+		t.Errorf("ScreenMode(1): BgColor = %d, want 0", CurrentScreen.BgColor)
+	}
+}

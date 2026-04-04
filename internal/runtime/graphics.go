@@ -245,6 +245,17 @@ func ClearScreen() {
 	}
 }
 
+// clampByte converts a float64 to a byte, clamping to [0, 255].
+func clampByte(v float64) byte {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
+}
+
 // pset is an internal helper that sets a pixel with bounds and viewport checking.
 func pset(x, y int, color byte) {
 	s := CurrentScreen
@@ -316,7 +327,7 @@ func bresenhamLine(x0, y0, x1, y1 int, color byte) {
 
 // Pset sets a pixel at (x, y) to the given color index.
 func Pset(x, y, color float64) {
-	pset(int(x), int(y), byte(color))
+	pset(int(x), int(y), clampByte(color))
 }
 
 // Point returns the color palette index of the pixel at screen coordinates (x, y).
@@ -362,7 +373,7 @@ func GetBackgroundColor() float64 {
 func DrawLine(x1, y1, x2, y2, color float64, boxMode string) {
 	ix1, iy1 := int(x1), int(y1)
 	ix2, iy2 := int(x2), int(y2)
-	c := byte(color)
+	c := clampByte(color)
 
 	switch boxMode {
 	case "":
@@ -400,7 +411,7 @@ func DrawLine(x1, y1, x2, y2, color float64, boxMode string) {
 // start/end are in radians; 0,0 means full circle.
 func Circle(x, y, radius, color, start, end, aspect float64) {
 	cx, cy := int(x), int(y)
-	c := byte(color)
+	c := clampByte(color)
 
 	rx := radius
 	ry := radius * aspect
@@ -494,8 +505,8 @@ func Paint(x, y, fillColor, borderColor float64) {
 		return
 	}
 	startX, startY := int(x), int(y)
-	fc := byte(fillColor)
-	bc := byte(borderColor)
+	fc := clampByte(fillColor)
+	bc := clampByte(borderColor)
 
 	// Bounds check start position
 	if startY < 0 || startY >= len(fb) || startX < 0 || startX >= len(fb[startY]) {
@@ -616,7 +627,7 @@ func Draw(cmd string) {
 			// Set color
 			if numStr != "" {
 				v, err := strconv.Atoi(numStr)
-				if err == nil {
+				if err == nil && v >= 0 && v <= 255 {
 					s.DrawColor = byte(v)
 				}
 			}
@@ -731,10 +742,6 @@ func Draw(cmd string) {
 			}
 		}
 
-		_ = noMove
-		_ = noDraw
-		_ = startX
-		_ = startY
 	}
 }
 
@@ -762,7 +769,7 @@ func ViewPort(x1, y1, x2, y2, fillColor, borderColor float64) {
 	s.ViewportActive = true
 
 	if fillColor >= 0 {
-		fc := byte(fillColor)
+		fc := clampByte(fillColor)
 		// Fill the viewport area directly (bypass viewport clipping since we are setting it)
 		fb := s.Framebuffer
 		if fb != nil {
@@ -789,7 +796,7 @@ func ViewPort(x1, y1, x2, y2, fillColor, borderColor float64) {
 	}
 
 	if borderColor >= 0 {
-		bc := byte(borderColor)
+		bc := clampByte(borderColor)
 		bresenhamLine(ix1, iy1, ix2, iy1, bc) // top
 		bresenhamLine(ix2, iy1, ix2, iy2, bc) // right
 		bresenhamLine(ix2, iy2, ix1, iy2, bc) // bottom

@@ -309,3 +309,169 @@ func TestRestoreTerminalRawButNoState(t *testing.T) {
 	}()
 	RestoreTerminal() // should not panic
 }
+
+// ---------------------------------------------------------------------------
+// Sequential Inkey calls consume bytes independently
+// ---------------------------------------------------------------------------
+
+func TestInkeyMultipleCalls(t *testing.T) {
+	// Verify sequential Inkey calls consume bytes independently.
+	// First call returns "A", second call returns "B".
+	withPipedStdin(t, []byte("A"), func() {
+		got1 := Inkey()
+		if got1 != "A" {
+			t.Errorf("first call: expected %q, got %q", "A", got1)
+		}
+	})
+	withPipedStdin(t, []byte("B"), func() {
+		got2 := Inkey()
+		if got2 != "B" {
+			t.Errorf("second call: expected %q, got %q", "B", got2)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tab key (byte 9)
+// ---------------------------------------------------------------------------
+
+func TestInkeyTabKey(t *testing.T) {
+	withPipedStdin(t, []byte{9}, func() {
+		got := Inkey()
+		if got != "\t" {
+			t.Errorf("tab: expected %q, got %q", "\t", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Null byte (byte 0)
+// ---------------------------------------------------------------------------
+
+func TestInkeyNullByte(t *testing.T) {
+	withPipedStdin(t, []byte{0}, func() {
+		got := Inkey()
+		// Byte 0 hits the default case in the single-byte switch,
+		// returning string(byte(0)) = "\x00".
+		if got != "\x00" {
+			t.Errorf("null byte: expected %q, got %q", "\x00", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// All function keys F1-F10 in both CSI (~) and SS3 (O) forms
+// ---------------------------------------------------------------------------
+
+func TestParseEscapeSequenceAllFKeys(t *testing.T) {
+	// CSI sequences: ESC [ <code> ~
+	csiCases := []struct {
+		seq  []byte
+		want string
+		name string
+	}{
+		{[]byte{27, '[', '1', '1', '~'}, "\x00\x3B", "CSI F1"},
+		{[]byte{27, '[', '1', '2', '~'}, "\x00\x3C", "CSI F2"},
+		{[]byte{27, '[', '1', '3', '~'}, "\x00\x3D", "CSI F3"},
+		{[]byte{27, '[', '1', '4', '~'}, "\x00\x3E", "CSI F4"},
+		{[]byte{27, '[', '1', '5', '~'}, "\x00\x3F", "CSI F5"},
+		{[]byte{27, '[', '1', '7', '~'}, "\x00\x40", "CSI F6"},
+		{[]byte{27, '[', '1', '8', '~'}, "\x00\x41", "CSI F7"},
+		{[]byte{27, '[', '1', '9', '~'}, "\x00\x42", "CSI F8"},
+		{[]byte{27, '[', '2', '0', '~'}, "\x00\x43", "CSI F9"},
+		{[]byte{27, '[', '2', '1', '~'}, "\x00\x44", "CSI F10"},
+	}
+	for _, tc := range csiCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			withPipedStdin(t, tc.seq, func() {
+				got := Inkey()
+				if got != tc.want {
+					t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+				}
+			})
+		})
+	}
+
+	// SS3 sequences: ESC O <letter>
+	ss3Cases := []struct {
+		seq  []byte
+		want string
+		name string
+	}{
+		{[]byte{27, 'O', 'P'}, "\x00\x3B", "SS3 F1"},
+		{[]byte{27, 'O', 'Q'}, "\x00\x3C", "SS3 F2"},
+		{[]byte{27, 'O', 'R'}, "\x00\x3D", "SS3 F3"},
+		{[]byte{27, 'O', 'S'}, "\x00\x3E", "SS3 F4"},
+	}
+	for _, tc := range ss3Cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			withPipedStdin(t, tc.seq, func() {
+				got := Inkey()
+				if got != tc.want {
+					t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+				}
+			})
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Insert / Delete keys
+// ---------------------------------------------------------------------------
+
+func TestParseEscapeSequenceInsertDelete(t *testing.T) {
+	// Insert: ESC [ 2 ~ -> scan 82
+	withPipedStdin(t, []byte{27, '[', '2', '~'}, func() {
+		got := Inkey()
+		if got != "\x00\x52" {
+			t.Errorf("Insert: got %q, want %q", got, "\x00\x52")
+		}
+	})
+	// Delete: ESC [ 3 ~ -> scan 83
+	withPipedStdin(t, []byte{27, '[', '3', '~'}, func() {
+		got := Inkey()
+		if got != "\x00\x53" {
+			t.Errorf("Delete: got %q, want %q", got, "\x00\x53")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// PgUp / PgDn keys
+// ---------------------------------------------------------------------------
+
+func TestParseEscapeSequencePageKeys(t *testing.T) {
+	// PgUp: ESC [ 5 ~ -> scan 73
+	withPipedStdin(t, []byte{27, '[', '5', '~'}, func() {
+		got := Inkey()
+		if got != "\x00\x49" {
+			t.Errorf("PgUp: got %q, want %q", got, "\x00\x49")
+		}
+	})
+	// PgDn: ESC [ 6 ~ -> scan 81
+	withPipedStdin(t, []byte{27, '[', '6', '~'}, func() {
+		got := Inkey()
+		if got != "\x00\x51" {
+			t.Errorf("PgDn: got %q, want %q", got, "\x00\x51")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// RestoreTerminal no-op when not in raw mode
+// ---------------------------------------------------------------------------
+
+func TestRestoreTerminalNoOp(t *testing.T) {
+	saved := termRaw
+	savedState := termState
+	termRaw = false
+	termState = nil
+	defer func() {
+		termRaw = saved
+		termState = savedState
+	}()
+	// Should return immediately without panic.
+	RestoreTerminal()
+}

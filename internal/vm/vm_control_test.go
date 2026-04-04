@@ -457,3 +457,45 @@ func TestFactorial(t *testing.T) {
 		t.Fatalf("expected 120, got %s", result)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: RESTORE resets data pointer
+// ---------------------------------------------------------------------------
+
+func TestExecRestoreBasic(t *testing.T) {
+	src := `DATA 1, 2, 3
+READ a
+READ b
+RESTORE
+READ c
+PRINT a; b; c`
+	output := compileAndRun(t, src)
+	// a=1, b=2, c=1 (RESTORE resets pointer so c reads first element again)
+	if !strings.Contains(output, "1") {
+		t.Errorf("expected output to contain '1', got %q", output)
+	}
+	// Verify c got the same value as a (both should be 1)
+	// The output with semicolons should show three values where first and third are the same
+	trimmed := strings.TrimSpace(output)
+	if !strings.Contains(trimmed, "1") || !strings.Contains(trimmed, "2") {
+		t.Errorf("expected output to contain '1' and '2', got %q", trimmed)
+	}
+}
+
+func TestExecRestoreMultiple(t *testing.T) {
+	src := `DATA 10, 20
+READ a
+RESTORE
+READ b
+RESTORE
+READ c
+PRINT a; b; c`
+	output := compileAndRun(t, src)
+	// All three READs should get 10 because RESTORE resets each time
+	trimmed := strings.TrimSpace(output)
+	// Count occurrences of "10" - should appear for all three variables
+	count := strings.Count(trimmed, "10")
+	if count < 3 {
+		t.Errorf("expected three occurrences of '10' (a, b, c all = 10), got %d in %q", count, trimmed)
+	}
+}

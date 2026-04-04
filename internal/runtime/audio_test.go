@@ -158,7 +158,7 @@ func TestPlayTempoAndLength(t *testing.T) {
 	if len(*tones) != 1 {
 		t.Fatalf("expected 1 tone, got %d", len(*tones))
 	}
-	want := (60.0 / 120.0) * (4.0 / 4.0) * (7.0 / 8.0)
+	want := (60.0 / 120.0) * 1.0 * (7.0 / 8.0)
 	if math.Abs((*tones)[0].dur-want) > 0.001 {
 		t.Errorf("duration: got %.4f want %.4f", (*tones)[0].dur, want)
 	}

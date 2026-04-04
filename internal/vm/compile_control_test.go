@@ -493,3 +493,66 @@ RETURN
 		t.Errorf("ON GOSUB: unexpected sub called, got %q", out)
 	}
 }
+
+// ===========================================================================
+// Compiler: SWAP statement
+// ===========================================================================
+
+func TestCompileSwapScalars(t *testing.T) {
+	src := `a = 10
+b = 20
+SWAP a, b
+PRINT a
+PRINT b`
+	output := compileAndRun(t, src)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines of output, got %q", output)
+	}
+	if !strings.Contains(lines[0], "20") {
+		t.Errorf("expected first line to contain '20', got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "10") {
+		t.Errorf("expected second line to contain '10', got %q", lines[1])
+	}
+}
+
+func TestCompileSwapArrayElements(t *testing.T) {
+	src := `DIM arr(5)
+arr(1) = 100
+arr(2) = 200
+SWAP arr(1), arr(2)
+PRINT arr(1)
+PRINT arr(2)`
+	output := compileAndRun(t, src)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines of output, got %q", output)
+	}
+	if !strings.Contains(lines[0], "200") {
+		t.Errorf("expected first line to contain '200', got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "100") {
+		t.Errorf("expected second line to contain '100', got %q", lines[1])
+	}
+}
+
+func TestCompileSwapMixed(t *testing.T) {
+	src := `DIM arr(5)
+a = 10
+arr(1) = 20
+SWAP a, arr(1)
+PRINT a
+PRINT arr(1)`
+	output := compileAndRun(t, src)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines of output, got %q", output)
+	}
+	if !strings.Contains(lines[0], "20") {
+		t.Errorf("expected first line to contain '20', got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "10") {
+		t.Errorf("expected second line to contain '10', got %q", lines[1])
+	}
+}

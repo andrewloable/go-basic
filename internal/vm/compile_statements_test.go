@@ -836,3 +836,92 @@ PRINT "ok"`
 		t.Errorf("NOP stmts = %q", output)
 	}
 }
+
+// ===========================================================================
+// Compiler: DEFINT / DEFSNG type declaration
+// ===========================================================================
+
+func TestCompileDefIntRange(t *testing.T) {
+	src := `DEFINT A-Z
+a = 100
+b = 200
+PRINT a + b`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "300") {
+		t.Errorf("expected output to contain '300', got %q", output)
+	}
+}
+
+func TestCompileDefSngSingle(t *testing.T) {
+	src := `DEFSNG X-X
+x = 3.14
+PRINT x`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "3.14") {
+		t.Errorf("expected output to contain '3.14', got %q", output)
+	}
+}
+
+// ===========================================================================
+// Compiler: DATA / READ with mixed and negative values
+// ===========================================================================
+
+func TestCompileDataMixedTypes(t *testing.T) {
+	src := `DATA 10, 3.14, "hello"
+READ a, b, c$
+PRINT a
+PRINT b
+PRINT c$`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "10") {
+		t.Errorf("expected output to contain '10', got %q", output)
+	}
+	if !strings.Contains(output, "3.14") {
+		t.Errorf("expected output to contain '3.14', got %q", output)
+	}
+	if !strings.Contains(output, "hello") {
+		t.Errorf("expected output to contain 'hello', got %q", output)
+	}
+}
+
+func TestCompileDataNegative(t *testing.T) {
+	src := `DATA -5, -3.14
+READ a, b
+PRINT a
+PRINT b`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "-5") {
+		t.Errorf("expected output to contain '-5', got %q", output)
+	}
+	if !strings.Contains(output, "-3.14") {
+		t.Errorf("expected output to contain '-3.14', got %q", output)
+	}
+}
+
+// ===========================================================================
+// Compiler: SELECT CASE with comparison operators
+// ===========================================================================
+
+func TestCompileSelectCaseComparisons(t *testing.T) {
+	src := `x = 5
+SELECT CASE x
+CASE IS = 5
+  PRINT "equal"
+END SELECT`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "equal") {
+		t.Errorf("expected output to contain 'equal', got %q", output)
+	}
+}
+
+func TestCompileSelectCaseLessThan(t *testing.T) {
+	src := `x = 3
+SELECT CASE x
+CASE IS < 5
+  PRINT "less"
+END SELECT`
+	output := compileAndRun(t, src)
+	if !strings.Contains(output, "less") {
+		t.Errorf("expected output to contain 'less', got %q", output)
+	}
+}

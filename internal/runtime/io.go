@@ -455,7 +455,7 @@ func FormatNumber(format string, value float64) string {
 
 	if scientific {
 		return formatScientific(absVal, negative, totalIntDigits, decDigits, hasDecimal,
-			leadingPlus, trailingPlus, trailingMinus, floatingDollar, asteriskFill, asteriskDollar)
+			leadingPlus, trailingPlus, trailingMinus, floatingDollar, asteriskDollar)
 	}
 
 	// Round the value to the specified decimal places.
@@ -629,7 +629,7 @@ func FormatNumber(format string, value float64) string {
 
 // formatScientific formats a number in scientific notation for PRINT USING with ^^^^.
 func formatScientific(absVal float64, negative bool, intDigits, decDigits int,
-	hasDecimal, leadingPlus, trailingPlus, trailingMinus, floatingDollar, asteriskFill, asteriskDollar bool) string {
+	hasDecimal, leadingPlus, trailingPlus, trailingMinus, floatingDollar, asteriskDollar bool) string {
 
 	// Total digit positions before the exponent.
 	totalDigits := intDigits

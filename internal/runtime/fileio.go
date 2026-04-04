@@ -176,7 +176,11 @@ func (fm *FileManager) FileClose(num int) error {
 	}
 
 	if bf.Writer != nil {
-		bf.Writer.Flush()
+		if err := bf.Writer.Flush(); err != nil {
+			bf.Handle.Close()
+			delete(fm.files, num)
+			return err
+		}
 	}
 	err := bf.Handle.Close()
 	delete(fm.files, num)
@@ -188,7 +192,9 @@ func (fm *FileManager) FileCloseAll() error {
 	var firstErr error
 	for num, bf := range fm.files {
 		if bf.Writer != nil {
-			bf.Writer.Flush()
+			if err := bf.Writer.Flush(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 		if err := bf.Handle.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -640,7 +646,9 @@ func (fm *FileManager) Eof(num int) (bool, error) {
 		return false, err
 	}
 	// Seek back to where we were
-	bf.Handle.Seek(cur, io.SeekStart)
+	if _, err := bf.Handle.Seek(cur, io.SeekStart); err != nil {
+		return false, err
+	}
 	return cur >= end, nil
 }
 
